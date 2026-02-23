@@ -10,6 +10,7 @@
 #include <mutex>
 #include <string>
 #include <cstdio>
+#include <vector>
 
 namespace fs = std::filesystem;
 using namespace Bn3Monkey;
@@ -311,4 +312,75 @@ TEST_F(Integration, runCommand)
         EXPECT_FALSE(g_stdout_buf.empty() && g_stderr_buf.empty())
             << "Expected some output from a bad command";
     }
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(Integration, uploadFile)
+{
+    // Prepare a local file with known binary content
+    fs::path local_src = fs::temp_directory_path() / "rcs_upload_src.bin";
+    const std::string content = "Hello, Remote Server!\nLine two.\n";
+    {
+        std::ofstream f(local_src, std::ios::binary);
+        f << content;
+    }
+
+    bool ok = uploadFile(client, local_src.string().c_str(), "uploaded.bin");
+    EXPECT_TRUE(ok) << "uploadFile should succeed";
+
+    // Verify the file appeared in the server's working directory
+    fs::path remote = test_dir / "uploaded.bin";
+    EXPECT_TRUE(fs::exists(remote)) << "uploaded.bin should exist on server side";
+
+    {
+        std::ifstream f(remote, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+        EXPECT_EQ(got, content) << "File contents should match";
+    }
+
+    // Uploading a non-existent local file should fail
+    bool fail = uploadFile(client, "/nonexistent_local_file_xyz.bin", "fail.bin");
+    EXPECT_FALSE(fail) << "uploadFile with missing local file should fail";
+
+    // Cleanup
+    std::error_code ec;
+    fs::remove(local_src, ec);
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(Integration, downloadFile)
+{
+    // Create a file on the server side
+    const std::string content = "Hello, Local Client!\nBinary \x01\x02\x03 data.\n";
+    {
+        std::ofstream f(test_dir / "server_data.bin", std::ios::binary);
+        f << content;
+    }
+
+    fs::path local_dst = fs::temp_directory_path() / "rcs_download_dst.bin";
+    {
+        std::error_code ec;
+        fs::remove(local_dst, ec); // ensure clean slate
+    }
+
+    bool ok = downloadFile(client, local_dst.string().c_str(), "server_data.bin");
+    EXPECT_TRUE(ok) << "downloadFile should succeed";
+    EXPECT_TRUE(fs::exists(local_dst)) << "downloaded file should exist locally";
+
+    {
+        std::ifstream f(local_dst, std::ios::binary);
+        std::string got((std::istreambuf_iterator<char>(f)),
+                         std::istreambuf_iterator<char>());
+        EXPECT_EQ(got, content) << "Downloaded content should match server file";
+    }
+
+    // Downloading a non-existent remote file should fail
+    bool fail = downloadFile(client, local_dst.string().c_str(),
+                             "nonexistent_remote.bin");
+    EXPECT_FALSE(fail) << "downloadFile for missing remote file should fail";
+
+    // Cleanup
+    std::error_code ec;
+    fs::remove(local_dst, ec);
 }

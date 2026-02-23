@@ -21,6 +21,9 @@ namespace Bn3Monkey
         INSTRUCTION_MOVE_DIRECTORY = 0x10001007,
 
         INSTRUCTION_RUN_COMMAND = 0x10002000,
+
+        INSTRUCTION_UPLOAD_FILE   = 0x10003000,
+        INSTRUCTION_DOWNLOAD_FILE = 0x10003001,
     };
 
     constexpr static const char REMOTE_COMMAND_MAGIC[] {'R', 'M', 'T', '_' };

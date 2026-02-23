@@ -7,6 +7,7 @@
 #include <thread>
 #include <atomic>
 #include <filesystem>
+#include <fstream>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -431,6 +432,58 @@ namespace Bn3Monkey
                 executeCommand(p0, stm_sock, server->current_directory);
                 RemoteCommandResponseHeader resp(req_header.instruction, 0);
                 sendAll(cmd_sock, &resp, sizeof(resp));
+                break;
+            }
+            // -----------------------------------------------------------------
+            case RemoteCommandInstruction::INSTRUCTION_UPLOAD_FILE:
+            {
+                // p0 = remote path (relative or absolute)
+                // p1 = raw file data (may be empty for an empty file)
+                std::error_code ec;
+                fs::path target = resolvePath(server->current_directory, p0);
+                fs::create_directories(target.parent_path(), ec);
+
+                bool result = false;
+                std::ofstream file(target, std::ios::binary);
+                if (file.is_open()) {
+                    if (!p1.empty())
+                        file.write(p1.data(),
+                                   static_cast<std::streamsize>(p1.size()));
+                    result = !file.fail();
+                }
+                RemoteCommandResponseHeader resp(req_header.instruction, sizeof(bool));
+                sendAll(cmd_sock, &resp, sizeof(resp));
+                sendAll(cmd_sock, &result, sizeof(result));
+                break;
+            }
+            // -----------------------------------------------------------------
+            case RemoteCommandInstruction::INSTRUCTION_DOWNLOAD_FILE:
+            {
+                // p0 = remote path (relative or absolute)
+                // Response: 1-byte flag (0=failure, 1=success) + file data
+                fs::path target = resolvePath(server->current_directory, p0);
+                std::ifstream file(target, std::ios::binary);
+                if (!file.is_open()) {
+                    // File not found or not readable
+                    uint8_t fail = 0;
+                    RemoteCommandResponseHeader resp(req_header.instruction,
+                                                    sizeof(fail));
+                    sendAll(cmd_sock, &resp, sizeof(resp));
+                    sendAll(cmd_sock, &fail, sizeof(fail));
+                } else {
+                    std::vector<char> data(
+                        (std::istreambuf_iterator<char>(file)),
+                         std::istreambuf_iterator<char>());
+                    uint32_t payload_len = 1u +
+                        static_cast<uint32_t>(data.size());
+                    RemoteCommandResponseHeader resp(req_header.instruction,
+                                                    payload_len);
+                    sendAll(cmd_sock, &resp, sizeof(resp));
+                    uint8_t ok = 1;
+                    sendAll(cmd_sock, &ok, sizeof(ok));
+                    if (!data.empty())
+                        sendAll(cmd_sock, data.data(), data.size());
+                }
                 break;
             }
             // -----------------------------------------------------------------

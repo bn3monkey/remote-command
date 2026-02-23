@@ -5,6 +5,7 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <fstream>
 
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
@@ -115,6 +116,20 @@ namespace Bn3Monkey
         if (!sendAll(sock, &header, sizeof(header))) return false;
         if (!sendAll(sock, p0, len0))                return false;
         return sendAll(sock, p1, len1);
+    }
+
+    // string path + raw binary payload (used by uploadFile)
+    static bool sendRequest(sock_t sock,
+                            RemoteCommandInstruction instruction,
+                            const char* p0,
+                            const void* p1_data, uint32_t p1_len)
+    {
+        uint32_t len0 = static_cast<uint32_t>(strlen(p0));
+        RemoteCommandRequestHeader header(instruction, len0, p1_len);
+        if (!sendAll(sock, &header, sizeof(header))) return false;
+        if (!sendAll(sock, p0, len0))                return false;
+        if (p1_len > 0 && !sendAll(sock, p1_data, p1_len)) return false;
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -446,6 +461,67 @@ namespace Bn3Monkey
         if (payload.size() >= sizeof(bool))
             memcpy(&result, payload.data(), sizeof(bool));
         return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // File transfer
+    // -------------------------------------------------------------------------
+    bool uploadFile(RemoteCommandClient* client,
+                    const char* local_file, const char* remote_file)
+    {
+        if (!client || !local_file || !remote_file) return false;
+
+        std::ifstream f(local_file, std::ios::binary);
+        if (!f.is_open()) return false;
+
+        std::vector<char> data((std::istreambuf_iterator<char>(f)),
+                                std::istreambuf_iterator<char>());
+
+        if (!sendRequest(client->command_sock,
+                         RemoteCommandInstruction::INSTRUCTION_UPLOAD_FILE,
+                         remote_file,
+                         data.empty() ? nullptr : data.data(),
+                         static_cast<uint32_t>(data.size())))
+            return false;
+
+        std::vector<char> payload;
+        if (!recvResponse(client->command_sock,
+                          RemoteCommandInstruction::INSTRUCTION_UPLOAD_FILE,
+                          payload))
+            return false;
+
+        bool result = false;
+        if (payload.size() >= sizeof(bool))
+            memcpy(&result, payload.data(), sizeof(bool));
+        return result;
+    }
+
+    bool downloadFile(RemoteCommandClient* client,
+                      const char* local_file, const char* remote_file)
+    {
+        if (!client || !local_file || !remote_file) return false;
+
+        if (!sendRequest(client->command_sock,
+                         RemoteCommandInstruction::INSTRUCTION_DOWNLOAD_FILE,
+                         remote_file))
+            return false;
+
+        std::vector<char> payload;
+        if (!recvResponse(client->command_sock,
+                          RemoteCommandInstruction::INSTRUCTION_DOWNLOAD_FILE,
+                          payload))
+            return false;
+
+        // First byte is the success flag (0 = failure, 1 = success)
+        if (payload.empty() || payload[0] == 0) return false;
+
+        std::ofstream f(local_file, std::ios::binary);
+        if (!f.is_open()) return false;
+
+        if (payload.size() > 1)
+            f.write(payload.data() + 1,
+                    static_cast<std::streamsize>(payload.size() - 1));
+        return true;
     }
 
     // -------------------------------------------------------------------------

@@ -38,6 +38,9 @@ namespace Bn3Monkey
     bool copyDirectory(RemoteCommandClient* client, const char* from_path, const char* to_path);
     bool moveDirectory(RemoteCommandClient* client, const char* from_path, const char* to_path);
 
+    bool uploadFile(RemoteCommandClient* client, const char* local_file, const char* remote_file);
+    bool downloadFile(RemoteCommandClient* client, const char* local_file, const char* remote_file);
+
     void runCommandImpl(RemoteCommandClient* client, const char* cmd);
 
     template<typename ...Args>

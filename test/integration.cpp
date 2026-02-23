@@ -40,10 +40,9 @@ static void onError(const char* msg)
 // ---------------------------------------------------------------------------
 // Test fixture
 //
-// Each TEST_F gets a fresh server + client.
-// Server runs in a background thread; after accept it handles requests in its
-// own internal handler thread.  The fixture's server_thread just holds the
-// return value so we can join later.
+// openRemoteCommandServer() is now non-blocking: it binds/listens and starts
+// an internal serverThread, then returns immediately.  SetUp just calls it
+// directly, connects the client, and waits briefly for serverThread to accept.
 // ---------------------------------------------------------------------------
 class Integration : public ::testing::Test
 {
@@ -53,7 +52,6 @@ protected:
 
     RemoteCommandServer* server = nullptr;
     RemoteCommandClient* client = nullptr;
-    std::thread          server_thread;
     fs::path             test_dir;
 
     void SetUp() override
@@ -71,23 +69,19 @@ protected:
             g_stderr_buf.clear();
         }
 
-        // Launch server in a background thread.
-        // openRemoteCommandServer blocks until both sockets are accepted,
-        // so we start it first and then connect the client.
-        server_thread = std::thread([this]() {
-            server = openRemoteCommandServer(
-                CMD_PORT, STR_PORT, test_dir.string().c_str());
-        });
+        // openRemoteCommandServer creates/binds/listens and returns immediately.
+        // Sockets are already in LISTEN state when the call returns.
+        server = openRemoteCommandServer(CMD_PORT, STR_PORT, test_dir.string().c_str());
+        ASSERT_NE(server, nullptr) << "Failed to start server";
 
-        // Give the server time to create sockets and call listen()
-        std::this_thread::sleep_for(std::chrono::milliseconds(200));
-
-        // Connect client (triggers accept on server side)
+        // Connect client — the OS queues the connection in the listen backlog,
+        // so no sleep is needed before connecting.
         client = createRemoteCommandContext(CMD_PORT, STR_PORT);
         ASSERT_NE(client, nullptr) << "Client failed to connect to server";
 
-        // Wait for the server thread to store the server pointer after accept
-        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        // Give serverThread time to accept() the queued connection and enter
+        // handleRequests() before the test body starts issuing commands.
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
 
         // Register callbacks so the tester can see live output
         onRemoteOutput(client, onOutput);
@@ -96,21 +90,19 @@ protected:
 
     void TearDown() override
     {
-        // Release client first — this closes client sockets, which causes
-        // the server's handler thread to exit naturally (recv returns 0).
+        // Release client first — closes its sockets, causing handleRequests()
+        // to exit (recv returns 0), and the serverThread loops back to accept.
         if (client) {
             releaseRemoteCommandContext(client);
             client = nullptr;
         }
 
-        // closeRemoteCommandServer joins the handler thread then cleans up.
+        // closeRemoteCommandServer sets running=false, closes any active client
+        // sockets, and joins the internal serverThread before returning.
         if (server) {
             closeRemoteCommandServer(server);
             server = nullptr;
         }
-
-        if (server_thread.joinable())
-            server_thread.join();
 
         // Remove temp dir (best-effort)
         std::error_code ec;

@@ -43,8 +43,8 @@ namespace Bn3Monkey
         sock_t command_client_sock { INVALID_SOCK };
         sock_t stream_client_sock  { INVALID_SOCK };
 
-        std::string     current_directory;
-        std::thread     handler_thread;
+        std::string       current_directory;
+        std::thread       server_thread;     // accept loop + request handler
         std::atomic<bool> running;
 
         RemoteCommandServer() : running(false) {}
@@ -239,7 +239,46 @@ namespace Bn3Monkey
     }
 
     // -------------------------------------------------------------------------
-    // Main request-handling loop (runs in handler_thread)
+    // Accept one connection on server_sock, using select() with a 100 ms
+    // timeout so the loop can be interrupted by setting running = false.
+    // Returns INVALID_SOCK when running becomes false or on error.
+    // addr_out may be nullptr if the caller does not need the peer address.
+    // -------------------------------------------------------------------------
+    static sock_t acceptWithSelect(sock_t          server_sock,
+                                   sockaddr_in*    addr_out,
+                                   std::atomic<bool>& running)
+    {
+        while (running.load()) {
+            fd_set read_fds;
+            FD_ZERO(&read_fds);
+            FD_SET(server_sock, &read_fds);
+
+            timeval tv{};
+            tv.tv_usec = 100 * 1000; // 100 ms
+
+#ifdef _WIN32
+            int ret = ::select(0, &read_fds, nullptr, nullptr, &tv);
+#else
+            int ret = ::select(static_cast<int>(server_sock) + 1,
+                               &read_fds, nullptr, nullptr, &tv);
+#endif
+            if (ret <= 0) continue; // timeout or transient error → retry
+
+            if (FD_ISSET(server_sock, &read_fds)) {
+                socklen_t len = sizeof(sockaddr_in);
+                sockaddr_in tmp{};
+                sock_t client = ::accept(server_sock,
+                                         reinterpret_cast<sockaddr*>(&tmp), &len);
+                if (client == INVALID_SOCK) continue;
+                if (addr_out) *addr_out = tmp;
+                return client;
+            }
+        }
+        return INVALID_SOCK;
+    }
+
+    // -------------------------------------------------------------------------
+    // Main request-handling loop (called from serverThread per client session)
     // -------------------------------------------------------------------------
     static void handleRequests(RemoteCommandServer* server)
     {
@@ -270,12 +309,12 @@ namespace Bn3Monkey
             // --- Dispatch ---
             switch (req_header.instruction)
             {
-            // -----------------------------------------------------------------
+                // -----------------------------------------------------------------
             case RemoteCommandInstruction::INSTRUCTION_CURRENT_WORKING_DIRECTORY:
             {
                 const std::string& cwd = server->current_directory;
                 RemoteCommandResponseHeader resp(req_header.instruction,
-                                                 static_cast<uint32_t>(cwd.size()));
+                    static_cast<uint32_t>(cwd.size()));
                 sendAll(cmd_sock, &resp, sizeof(resp));
                 sendAll(cmd_sock, cwd.c_str(), cwd.size());
                 break;
@@ -310,7 +349,7 @@ namespace Bn3Monkey
             case RemoteCommandInstruction::INSTRUCTION_LIST_DIRECTORY_CONTENTS:
             {
                 fs::path target = resolvePath(server->current_directory,
-                                              p0.empty() ? "." : p0);
+                    p0.empty() ? "." : p0);
 
                 std::vector<RemoteDirectoryContentInner> contents;
                 std::error_code ec;
@@ -319,21 +358,22 @@ namespace Bn3Monkey
                     if (entry.is_directory(ec)) {
                         contents.emplace_back(
                             RemoteDirectoryContentTypeInner::DIRECTORY, name.c_str());
-                    } else if (entry.is_regular_file(ec)) {
+                    }
+                    else if (entry.is_regular_file(ec)) {
                         contents.emplace_back(
                             RemoteDirectoryContentTypeInner::FILE, name.c_str());
                     }
                 }
 
-                uint32_t count       = static_cast<uint32_t>(contents.size());
+                uint32_t count = static_cast<uint32_t>(contents.size());
                 uint32_t payload_len = sizeof(uint32_t) +
-                                       count * static_cast<uint32_t>(sizeof(RemoteDirectoryContentInner));
+                    count * static_cast<uint32_t>(sizeof(RemoteDirectoryContentInner));
                 RemoteCommandResponseHeader resp(req_header.instruction, payload_len);
                 sendAll(cmd_sock, &resp, sizeof(resp));
                 sendAll(cmd_sock, &count, sizeof(count));
                 if (count > 0)
                     sendAll(cmd_sock, contents.data(),
-                            count * sizeof(RemoteDirectoryContentInner));
+                        count * sizeof(RemoteDirectoryContentInner));
                 break;
             }
             // -----------------------------------------------------------------
@@ -363,7 +403,7 @@ namespace Bn3Monkey
             {
                 std::error_code ec;
                 fs::path from = resolvePath(server->current_directory, p0);
-                fs::path to   = resolvePath(server->current_directory, p1);
+                fs::path to = resolvePath(server->current_directory, p1);
                 fs::copy(from, to, fs::copy_options::recursive, ec);
                 bool result = !ec;
                 RemoteCommandResponseHeader resp(req_header.instruction, sizeof(bool));
@@ -376,7 +416,7 @@ namespace Bn3Monkey
             {
                 std::error_code ec;
                 fs::path from = resolvePath(server->current_directory, p0);
-                fs::path to   = resolvePath(server->current_directory, p1);
+                fs::path to = resolvePath(server->current_directory, p1);
                 fs::rename(from, to, ec);
                 bool result = !ec;
                 RemoteCommandResponseHeader resp(req_header.instruction, sizeof(bool));
@@ -399,6 +439,60 @@ namespace Bn3Monkey
             }
         }
     }
+
+    // -------------------------------------------------------------------------
+    // Outer server loop (runs in server_thread).
+    // Uses select-based accept so it wakes up every 100 ms to check running.
+    // Prints client IP:port on connect and disconnect, then loops for next client.
+    // -------------------------------------------------------------------------
+    static void serverThread(RemoteCommandServer* server)
+    {
+        while (server->running.load()) {
+            // --- Wait for command connection ---
+            sockaddr_in cmd_addr{};
+            sock_t cmd_sock = acceptWithSelect(server->command_server_sock,
+                                               &cmd_addr, server->running);
+            if (cmd_sock == INVALID_SOCK) break;
+
+            // --- Wait for stream connection ---
+            sock_t stm_sock = acceptWithSelect(server->stream_server_sock,
+                                               nullptr, server->running);
+            if (stm_sock == INVALID_SOCK) {
+                closeSocket(cmd_sock);
+                break;
+            }
+
+            // --- Log connection ---
+            char ip[INET_ADDRSTRLEN] = "?.?.?.?";
+            inet_ntop(AF_INET, &cmd_addr.sin_addr, ip, sizeof(ip));
+            int  peer_port = ntohs(cmd_addr.sin_port);
+            std::printf("[Server] Client connected    : %s:%d\n", ip, peer_port);
+            std::fflush(stdout);
+
+            // Store so closeRemoteCommandServer can interrupt handleRequests
+            server->command_client_sock = cmd_sock;
+            server->stream_client_sock  = stm_sock;
+
+            // --- Serve until client disconnects or server is stopped ---
+            handleRequests(server);
+
+            // --- Log disconnection ---
+            std::printf("[Server] Client disconnected : %s:%d\n", ip, peer_port);
+            std::fflush(stdout);
+
+            // --- Cleanup client sockets ---
+            if (server->command_client_sock != INVALID_SOCK) {
+                closeSocket(server->command_client_sock);
+                server->command_client_sock = INVALID_SOCK;
+            }
+            if (server->stream_client_sock != INVALID_SOCK) {
+                closeSocket(server->stream_client_sock);
+                server->stream_client_sock = INVALID_SOCK;
+            }
+        }
+    }
+
+    
 
     // -------------------------------------------------------------------------
     // Create a listening TCP socket bound to port
@@ -476,33 +570,11 @@ namespace Bn3Monkey
             return nullptr;
         }
 
-        // Accept command connection (blocking)
-        server->command_client_sock = ::accept(server->command_server_sock, nullptr, nullptr);
-        if (server->command_client_sock == INVALID_SOCK) {
-            closeSocket(server->command_server_sock);
-            closeSocket(server->stream_server_sock);
-            delete server;
-#ifdef _WIN32
-            WSACleanup();
-#endif
-            return nullptr;
-        }
-
-        // Accept stream connection (blocking)
-        server->stream_client_sock = ::accept(server->stream_server_sock, nullptr, nullptr);
-        if (server->stream_client_sock == INVALID_SOCK) {
-            closeSocket(server->command_client_sock);
-            closeSocket(server->command_server_sock);
-            closeSocket(server->stream_server_sock);
-            delete server;
-#ifdef _WIN32
-            WSACleanup();
-#endif
-            return nullptr;
-        }
-
+        // Start the async accept + request-handling loop.
+        // openRemoteCommandServer returns immediately; connections are handled
+        // in the background by serverThread.
         server->running.store(true);
-        server->handler_thread = std::thread(handleRequests, server);
+        server->server_thread = std::thread(serverThread, server);
         return server;
     }
 
@@ -510,9 +582,12 @@ namespace Bn3Monkey
     {
         if (!server) return;
 
+        // Signal the server thread to stop
         server->running.store(false);
 
-        // Close client sockets to unblock any blocking recv in the handler
+        // If a client is currently being served, close its sockets so that
+        // the blocking recvAll() inside handleRequests() wakes up immediately.
+        // (shutdown + close interrupts the blocked recv on POSIX and Windows)
         if (server->command_client_sock != INVALID_SOCK) {
             closeSocket(server->command_client_sock);
             server->command_client_sock = INVALID_SOCK;
@@ -522,9 +597,13 @@ namespace Bn3Monkey
             server->stream_client_sock = INVALID_SOCK;
         }
 
-        if (server->handler_thread.joinable())
-            server->handler_thread.join();
+        // Wait for the server thread to exit.
+        // If it is in acceptWithSelect(), it will wake within 100 ms (next timeout).
+        // If it is in handleRequests(), the socket closure above woke it already.
+        if (server->server_thread.joinable())
+            server->server_thread.join();
 
+        // Now it is safe to close the listening sockets (no thread is using them)
         if (server->command_server_sock != INVALID_SOCK)
             closeSocket(server->command_server_sock);
         if (server->stream_server_sock != INVALID_SOCK)

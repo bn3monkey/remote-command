@@ -42,10 +42,14 @@ endif()
 # remote_command_server  —  C++17 static library
 #   Uses std::filesystem; must be compiled with C++17 or later.
 # ---------------------------------------------------------------------------
+file(GLOB_RECURSE SERVER_SOURCES
+    src/server/*.cpp
+    src/server/*.hpp)
+
 add_library(remote_command_server STATIC
     include/remote_command_server.hpp
     src/server/remote_command_server.cpp
-    src/protocol/remote_command_protocol.hpp
+    ${SERVER_SOURCES}
 )
 
 target_include_directories(remote_command_server

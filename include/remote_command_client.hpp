@@ -5,6 +5,47 @@
 #include <cstdint>
 #include <vector>
 
+// ---------------------------------------------------------------------------
+// Portable printf-format checking macros
+//
+// RC_PRINTF_FUNC(fmt, first) – function-level attribute that instructs the
+//   compiler to verify format strings at every call site.
+//   fmt  = 1-based index of the format-string parameter
+//   first= 1-based index of the first variadic argument
+//   Supported: GCC, Clang (Android, Linux, MinGW, macOS, …)
+//
+// RC_PRINTF_STR – parameter annotation placed directly before the format-
+//   string argument.  Enables /analyze checks on MSVC.  Empty elsewhere.
+//
+// RC_PUSH_NO_FMT / RC_POP_NO_FMT – suppress "format string is not a string
+//   literal" inside wrapper bodies where the format has already been
+//   validated at the call site by RC_PRINTF_FUNC / RC_PRINTF_STR.
+// ---------------------------------------------------------------------------
+#if defined(__clang__) || defined(__GNUC__)
+    #define RC_PRINTF_FUNC(fmt, first) \
+        __attribute__((format(printf, fmt, first)))
+    #define RC_PRINTF_STR
+    #define RC_PUSH_NO_FMT \
+        _Pragma("GCC diagnostic push") \
+        _Pragma("GCC diagnostic ignored \"-Wformat-security\"")
+    #define RC_POP_NO_FMT \
+        _Pragma("GCC diagnostic pop")
+#elif defined(_MSC_VER)
+    #include <sal.h>
+    #define RC_PRINTF_FUNC(fmt, first)
+    #define RC_PRINTF_STR _Printf_format_string_
+    #define RC_PUSH_NO_FMT \
+        __pragma(warning(push)) \
+        __pragma(warning(disable: 4774))
+    #define RC_POP_NO_FMT \
+        __pragma(warning(pop))
+#else
+    #define RC_PRINTF_FUNC(fmt, first)
+    #define RC_PRINTF_STR
+    #define RC_PUSH_NO_FMT
+    #define RC_POP_NO_FMT
+#endif
+
 namespace Bn3Monkey
 {
     struct RemoteCommandClient;
@@ -47,20 +88,27 @@ namespace Bn3Monkey
     void runCommandImpl(RemoteCommandClient* client, const char* cmd);
 
     template<typename ...Args>
-    void runCommand(RemoteCommandClient* client, const char* fmt, Args... args) {
+    RC_PRINTF_FUNC(2, 3)
+    void runCommand(RemoteCommandClient* client, RC_PRINTF_STR const char* fmt, Args... args) {
         char buffer[4096] {0};
+        RC_PUSH_NO_FMT
         snprintf(buffer, sizeof(buffer), fmt, args...);
+        RC_POP_NO_FMT
         runCommandImpl(client, buffer);
     }
 
     int32_t openProcessImpl(RemoteCommandClient* client, const char* cmd);
     template<typename ...Args>
-    int32_t openProcess(RemoteCommandClient* client, const char* fmt, Args... args)
+    RC_PRINTF_FUNC(2, 3)
+    int32_t openProcess(RemoteCommandClient* client, RC_PRINTF_STR const char* fmt, Args... args)
     {
         char buffer[4096] {0};
+        RC_PUSH_NO_FMT
         snprintf(buffer, sizeof(buffer), fmt, args...);
+        RC_POP_NO_FMT
         return openProcessImpl(client, buffer);
-    }    
+    }
+
     void closeProcess(RemoteCommandClient* client, int32_t process_id);
 }
 

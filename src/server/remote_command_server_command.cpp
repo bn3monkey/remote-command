@@ -314,6 +314,11 @@ namespace Bn3Monkey
 
         if (::bind(sock, reinterpret_cast<sockaddr*>(&addr), sizeof(addr)) != 0 ||
             ::listen(sock, 1) != 0) {
+#ifdef _WIN32
+            shutdown(sock, SD_BOTH);
+#else
+            shutdown(sock, SHUT_RDWR);
+#endif
             closeSocket(sock);
             return false;
         }
@@ -332,6 +337,7 @@ namespace Bn3Monkey
 
         // Wake up handleCommand if it is blocked on recvAll
         if (_client_sock != INVALID_SOCK) {
+
             closeSocket(_client_sock);
             _client_sock = INVALID_SOCK;
         }
@@ -340,6 +346,11 @@ namespace Bn3Monkey
             _handler.join();
 
         if (_server_sock != INVALID_SOCK) {
+#ifdef _WIN32
+            shutdown(_server_sock, SD_BOTH);
+#else
+            shutdown(_server_sock, SHUT_RDWR);
+#endif
             closeSocket(_server_sock);
             _server_sock = INVALID_SOCK;
         }

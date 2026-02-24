@@ -282,7 +282,11 @@ TEST_F(Integration, moveDirectory)
 TEST_F(Integration, runCommand)
 {
     // ---- 1. stdout capture ----
+#if defined(_WIN32)
+    runCommandImpl(client, "cmd /c echo remote_hello");
+#else
     runCommandImpl(client, "echo remote_hello");
+#endif
     flushStream();   // let stream thread deliver the packet
 
     {
@@ -294,7 +298,11 @@ TEST_F(Integration, runCommand)
     }
 
     // ---- 2. file creation via command ----
+#if defined(_WIN32)
+    runCommandImpl(client, "cmd /c echo created_by_cmd > cmd_output.txt");
+#else
     runCommandImpl(client, "echo created_by_cmd > cmd_output.txt");
+#endif
     flushStream();
 
     EXPECT_TRUE(fs::exists(test_dir / "cmd_output.txt"))
@@ -307,7 +315,7 @@ TEST_F(Integration, runCommand)
     }
 
 #ifdef _WIN32
-    runCommandImpl(client, "nonexistent_cmd_xyz 2>&1");
+    runCommandImpl(client, "cmd /c nonexistent_cmd_xyz 2>&1");
 #else
     runCommandImpl(client, "nonexistent_cmd_xyz_abc_123");
 #endif
@@ -397,6 +405,7 @@ TEST_F(Integration, downloadFile)
 TEST_F(Integration, openProcess_and_closeProcess)
 {
     // Start a long-running process that will NOT finish during the test
+
 #ifdef _WIN32
     int32_t pid = openProcess(client, "ping -n 20 127.0.0.1");
 #else
@@ -425,7 +434,11 @@ TEST_F(Integration, openProcess_output)
     }
 
     // Start a quick process that prints one line then exits
-    int32_t pid = openProcess(client, "echo hello_from_openprocess");
+#if defined(_WIN32)
+    int32_t pid = openProcess(client, "cmd /c echo hello_from_openprocess");
+#else
+    int32_t pid =  openProcess(client, "echo hello_from_openprocess");
+#endif
     EXPECT_GT(pid, 0) << "openProcess should return a positive ID";
 
     // Wait long enough for the process to finish and stream to deliver

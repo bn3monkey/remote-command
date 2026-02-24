@@ -23,7 +23,6 @@ namespace Bn3Monkey
         ~RemoteProcess();
 
         // Synchronously creates the process (returns -1 on failure, 1 on success).
-        // Completion is waited asynchronously in _executor thread.
         // stdout/stderr reader threads start immediately and forward pipe output
         // to the current stream socket.
         // Returns -1 if a process is already running.
@@ -45,7 +44,8 @@ namespace Bn3Monkey
     private:
         void stdoutReader();
         void stderrReader();
-        void joinAll();         // joins _executor, _stdout_reader, _stderr_reader
+        void joinReaders();     // joins _stdout_reader, _stderr_reader
+        void reapProcess();     // WaitForSingleObject/waitpid + handle cleanup
         void closePipes();      // closes platform pipe read-handles
 
         // _stream_mtx guards both _stream_sock (for setStreamSocket) and
@@ -53,7 +53,6 @@ namespace Bn3Monkey
         sock_t     _stream_sock { INVALID_SOCK };
         std::mutex _stream_mtx;
 
-        std::thread _executor;
         std::thread _stdout_reader;
         std::thread _stderr_reader;
 
@@ -61,6 +60,7 @@ namespace Bn3Monkey
 
 #ifdef _WIN32
         HANDLE _hProcess    { INVALID_HANDLE_VALUE };
+        HANDLE _stdin_write { INVALID_HANDLE_VALUE };
         HANDLE _stdout_read { INVALID_HANDLE_VALUE };
         HANDLE _stderr_read { INVALID_HANDLE_VALUE };
 #else

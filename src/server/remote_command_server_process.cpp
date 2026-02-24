@@ -18,6 +18,10 @@ namespace Bn3Monkey
     void RemoteProcess::closePipes()
     {
 #ifdef _WIN32
+        if (_stdin_write != INVALID_HANDLE_VALUE) {
+            CloseHandle(_stdin_write);
+            _stdin_write = INVALID_HANDLE_VALUE;
+        }
         if (_stdout_read != INVALID_HANDLE_VALUE) {
             CloseHandle(_stdout_read);
             _stdout_read = INVALID_HANDLE_VALUE;
@@ -32,11 +36,28 @@ namespace Bn3Monkey
 #endif
     }
 
-    void RemoteProcess::joinAll()
+    void RemoteProcess::joinReaders()
     {
-        if (_executor.joinable())      _executor.join();
         if (_stdout_reader.joinable()) _stdout_reader.join();
         if (_stderr_reader.joinable()) _stderr_reader.join();
+    }
+
+    void RemoteProcess::reapProcess()
+    {
+#ifdef _WIN32
+        if (_hProcess != INVALID_HANDLE_VALUE) {
+            WaitForSingleObject(_hProcess, INFINITE);
+            CloseHandle(_hProcess);
+            _hProcess = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (_pid != -1) {
+            int status;
+            waitpid(_pid, &status, 0);
+            _pid = -1;
+        }
+#endif
+        _current_process_id = -1;
     }
 
     // -------------------------------------------------------------------------
@@ -120,7 +141,7 @@ namespace Bn3Monkey
             return -1;
 
         // Clean up threads and pipes from the previous execution
-        joinAll();
+        joinReaders();
         closePipes();
 
 #ifdef _WIN32
@@ -142,22 +163,28 @@ namespace Bn3Monkey
         SetHandleInformation(_stdout_read, HANDLE_FLAG_INHERIT, 0);
         SetHandleInformation(_stderr_read, HANDLE_FLAG_INHERIT, 0);
 
-        // Open NUL device for stdin so the child always has a valid handle,
-        // even when the parent process has no console (CREATE_NO_WINDOW).
-        HANDLE hNul = CreateFileA("nul", GENERIC_READ,
-                                  FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
-                                  OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        // Create a stdin pipe: child gets the read end, we keep the write end open.
+        // As long as _stdin_write is open the child never receives EOF on stdin,
+        // which is required for interactive processes like `openssl s_server`.
+        HANDLE stdin_read = INVALID_HANDLE_VALUE;
+        if (!CreatePipe(&stdin_read, &_stdin_write, &sa, 0)) {
+            CloseHandle(_stdout_read); _stdout_read = INVALID_HANDLE_VALUE;
+            CloseHandle(_stderr_read); _stderr_read = INVALID_HANDLE_VALUE;
+            CloseHandle(stdout_write);
+            CloseHandle(stderr_write);
+            return -1;
+        }
+        // Write end must not be inherited by the child
+        SetHandleInformation(_stdin_write, HANDLE_FLAG_INHERIT, 0);
 
         STARTUPINFOA si {};
         si.cb         = sizeof(si);
         si.dwFlags    = STARTF_USESTDHANDLES;
+        si.hStdInput  = stdin_read;
         si.hStdOutput = stdout_write;
         si.hStdError  = stderr_write;
-        si.hStdInput  = (hNul != INVALID_HANDLE_VALUE) ? hNul : NULL;
 
-        // Wrap with "cmd /c" so that shell built-ins (echo, dir, …) and PATH
-        // executables (cmake, git, …) are all handled correctly.
-        std::string cmdLine = std::string("cmd /c ") + cmd;
+        std::string cmdLine(cmd);
 
         PROCESS_INFORMATION pi {};
 
@@ -170,10 +197,11 @@ namespace Bn3Monkey
             (cwd && cwd[0]) ? cwd : nullptr,
             &si, &pi);
 
-        // Write ends and nul belong to the child; close our copies
+        // Write ends and stdin_read belong to the child; close our copies.
+        // _stdin_write is intentionally kept open so the child never gets EOF.
+        CloseHandle(stdin_read);
         CloseHandle(stdout_write);
         CloseHandle(stderr_write);
-        if (hNul != INVALID_HANDLE_VALUE) CloseHandle(hNul);
 
         if (!ok) {
             printf("[Process] CreateProcessA failed, error=%lu\n", GetLastError());
@@ -202,7 +230,9 @@ namespace Bn3Monkey
         }
 
         if (pid == 0) {
-            // Child: wire up stdout/stderr to the write ends
+            // Child: become a new process group leader so kill(-pgid) later
+            // can terminate the entire subtree (including grandchildren).
+            setpgid(0, 0);
             dup2(stdout_pipe[1], STDOUT_FILENO);
             dup2(stderr_pipe[1], STDERR_FILENO);
             ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
@@ -225,22 +255,6 @@ namespace Bn3Monkey
         _stdout_reader = std::thread(&RemoteProcess::stdoutReader, this);
         _stderr_reader = std::thread(&RemoteProcess::stderrReader, this);
 
-        _executor = std::thread([this]() {
-            setCurrentThreadName("RC_EXEC");
-#ifdef _WIN32
-            WaitForSingleObject(_hProcess, INFINITE);
-            CloseHandle(_hProcess);
-            _hProcess = INVALID_HANDLE_VALUE;
-#else
-            int status;
-            waitpid(_pid, &status, 0);
-            _pid = -1;
-#endif
-            _current_process_id = -1;
-            // Pipe write ends were closed after CreateProcess/fork, so the
-            // reader threads receive EOF and exit on their own.
-        });
-
         return 1;
     }
 
@@ -250,7 +264,9 @@ namespace Bn3Monkey
 
     void RemoteProcess::await(int32_t /*process_id*/)
     {
-        joinAll();
+        // Reader threads exit naturally when the process ends (pipe EOF).
+        joinReaders();
+        reapProcess();  // waitpid/WaitForSingleObject + sets _current_process_id = -1
     }
 
     // -------------------------------------------------------------------------
@@ -262,11 +278,29 @@ namespace Bn3Monkey
 #ifdef _WIN32
         if (_hProcess != INVALID_HANDLE_VALUE)
             TerminateProcess(_hProcess, 1);
+
+        // CancelSynchronousIo cancels the pending ReadFile in each reader thread,
+        // causing it to return ERROR_OPERATION_ABORTED immediately.
+        // This avoids the CloseHandle/ReadFile deadlock: we never touch the pipe
+        // handle while ReadFile is in progress; we just cancel the I/O first,
+        // then close the handles after the threads have exited.
+        if (_stdout_reader.joinable())
+            CancelSynchronousIo(_stdout_reader.native_handle());
+        if (_stderr_reader.joinable())
+            CancelSynchronousIo(_stderr_reader.native_handle());
+
+        joinReaders();
+        closePipes();
 #else
         if (_pid != -1)
-            kill(_pid, SIGTERM);
+            kill(-_pid, SIGTERM);   // negative PID = kill entire process group
+
+        // On Linux, close(fd) does not block on a concurrent read(fd),
+        // so closePipes() before joinReaders() is safe.
+        closePipes();
+        joinReaders();
 #endif
-        joinAll();
+        reapProcess();  // reap zombie + sets _current_process_id = -1
     }
 
 } // namespace Bn3Monkey

@@ -2,6 +2,15 @@ cmake_minimum_required(VERSION 3.15)
 
 project(remote-command C CXX)
 
+
+include(FetchContent)
+FetchContent_Declare(
+    kiotty_discover
+    GIT_REPOSITORY https://github.com/kiotty/kiotty-discovery
+    GIT_TAG 1.0.0
+)
+FetchContent_MakeAvailable(kiotty_discover)
+
 # ---------------------------------------------------------------------------
 # remote_command_client  —  C++11 static library
 #   Header-only public interface in include/
@@ -10,6 +19,7 @@ project(remote-command C CXX)
 add_library(remote_command_client STATIC
     include/remote_command_client.hpp
     src/client/remote_command_client.cpp
+    src/protocol/remote_command_protocol.hpp
 )
 
 target_include_directories(remote_command_client
@@ -23,6 +33,7 @@ set_target_properties(remote_command_client PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
+target_link_libraries(remote_command_client PRIVATE kiotty_discovery_client)
 if(WIN32)
     target_link_libraries(remote_command_client PRIVATE ws2_32)
 endif()
@@ -34,6 +45,7 @@ endif()
 add_library(remote_command_server STATIC
     include/remote_command_server.hpp
     src/server/remote_command_server.cpp
+    src/protocol/remote_command_protocol.hpp
 )
 
 target_include_directories(remote_command_server
@@ -47,6 +59,7 @@ set_target_properties(remote_command_server PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
+target_link_libraries(remote_command_server PRIVATE kiotty_discovery_server)
 if(WIN32)
     target_link_libraries(remote_command_server PRIVATE ws2_32)
 endif()
@@ -62,7 +75,6 @@ endif()
 option(REMOTE_COMMAND_BUILD_TESTS "Build integration tests (requires network access)" ON)
 
 if(REMOTE_COMMAND_BUILD_TESTS)
-    include(FetchContent)
     FetchContent_Declare(
         googletest
         GIT_REPOSITORY https://github.com/google/googletest.git

@@ -152,5 +152,7 @@ namespace Bn3Monkey
     //    - padding (4byte)
     // - payload (payload_size byte)
 
+    static constexpr const char PORT_COMMAND[] {"RC_CMD"};
+    static constexpr const char PORT_STREAM [] {"RC_STREAM"};
 }
 #endif // __BN3MONKEY_REMOTE_COMMAND_PROTOCOL__

@@ -1,6 +1,6 @@
 # remote-command
 
-TCP 소켓 두 개를 이용해 원격 프로세스에 명령을 내리고, 파일을 주고받으며, stdout/stderr 스트림을 실시간으로 수신하는 C++ 라이브러리입니다.
+TCP 소켓 두 개를 이용해 원격 프로세스에 명령을 내리고, 파일을 주고받으며, stdout/stderr 스트림을 실시간으로 수신하는 C++ 라이브러리입니다. UDP를 통한 서버 자동 탐색도 지원합니다.
 
 ---
 
@@ -24,15 +24,20 @@ TCP 소켓 두 개를 이용해 원격 프로세스에 명령을 내리고, 파�
 ```
 [Client Process]                      [Server Process]
                                        (원격 또는 로컬)
-  createRemoteCommandContext()
+  discoverRemoteCommandClient()
+        │
+        ├─── UDP broadcast ──────────▶ KiottyDiscovery (discovery 포트)
+        │◀── 서버 IP + 포트 ───────────
         │
         ├─── command_sock (TCP) ──────▶ 요청 / 응답 (동기)
         │
         └─── stream_sock  (TCP) ◀────── stdout / stderr 스트리밍 (비동기)
 ```
 
-클라이언트는 command 소켓으로 요청을 보내고 응답을 동기적으로 기다립니다.
+클라이언트는 UDP 탐색으로 서버를 찾은 뒤 TCP 연결을 두 개 엽니다.
+요청은 command 소켓으로 보내고 응답을 동기적으로 기다립니다.
 서버가 명령을 실행하는 동안 stdout/stderr는 stream 소켓을 통해 비동기적으로 클라이언트에 push됩니다.
+서버 IP와 포트를 미리 알고 있다면 탐색 단계를 건너뛰고 직접 연결할 수도 있습니다.
 
 ---
 
@@ -44,6 +49,12 @@ TCP 소켓 두 개를 이용해 원격 프로세스에 명령을 내리고, 파�
 | `remote_command_server` | static lib (C++17) | 명령 수신, 실행, 스트리밍 |
 | `remote_command_server_app` | executable | 서버 바이너리 (prj/) |
 | `integration_test` | executable | 통합 테스트 (gtest) |
+
+**의존 라이브러리**
+
+| 라이브러리 | 소스 | 사용처 |
+|-----------|------|-------|
+| [`kiotty_discover`](https://github.com/kiotty/kiotty-discovery) | FetchContent (tag `1.0.0`) | 클라이언트 + 서버 |
 
 **소스 트리**
 
@@ -71,6 +82,16 @@ remote-command/
 
 ## 기능
 
+### 서버 탐색 (Discovery)
+
+| 함수 | 설명 |
+|------|------|
+| `discoverRemoteCommandClient(discovery_port)` | UDP 탐색 요청을 브로드캐스트하고 서버 응답을 받아 연결된 클라이언트를 반환 |
+| `getRemoteCommandServerAddress(client)` | 연결된 서버의 IP 주소 문자열 반환 |
+
+- `discoverRemoteCommandClient`는 서버로부터 응답이 올 때까지 **블로킹**합니다.
+- 탐색 기능은 [`kiotty_discover`](https://github.com/kiotty/kiotty-discovery) 라이브러리를 사용합니다.
+
 ### 디렉터리 조작
 
 | 함수 | 설명 |
@@ -92,7 +113,7 @@ remote-command/
 | `downloadFile(client, local, remote)` | 서버 파일을 로컬 파일 시스템으로 수신 |
 
 - `local` / `remote` 경로 모두 절대 경로 또는 상대 경로를 사용할 수 있습니다.
-- 상대 경로는 remote 기준으로 **서버의 현재 작업 디렉터리**, local 기준으로 **클라이언트 프로세스의 CWD** 를 기준으로 해석됩니다.
+- 상대 경로는 remote 기준으로 **서버의 현재 작업 디렉터리**, local 기준으로 **클라이언트 프로세스의 CWD**를 기준으로 해석됩니다.
 - `uploadFile`은 서버에서 상위 디렉터리를 자동으로 생성합니다.
 - 두 함수 모두 이진 데이터를 그대로 전송하므로 모든 파일 형식에 안전하게 사용할 수 있습니다.
 
@@ -186,6 +207,8 @@ C++11 이상이면 사용 가능합니다.
 
 ## CMake 통합 (FetchContent)
 
+`kiotty_discover` 의존성은 루트 `CMakeLists.txt`에서 자동으로 가져오므로 별도 설정이 필요 없습니다.
+
 ### 클라이언트만 사용하는 경우
 
 원격 서버에 명령을 보내는 클라이언트 코드에 통합할 때 사용합니다.
@@ -209,7 +232,7 @@ target_link_libraries(your_target
 )
 ```
 
-사용 예시:
+사용 예시 (탐색 이용):
 
 ```cpp
 #include <remote_command_client.hpp>
@@ -218,8 +241,11 @@ static void on_out(const char* msg) { printf("%s", msg); }
 static void on_err(const char* msg) { fprintf(stderr, "%s", msg); }
 
 int main() {
-    auto* client = Bn3Monkey::createRemoteCommandContext(9001, 9002, "192.168.1.100");
+    // UDP 탐색으로 서버 자동 연결
+    auto* client = Bn3Monkey::discoverRemoteCommandClient(9000);
     if (!client) return 1;
+
+    printf("연결된 서버: %s\n", Bn3Monkey::getRemoteCommandServerAddress(client));
 
     Bn3Monkey::onRemoteOutput(client, on_out);
     Bn3Monkey::onRemoteError (client, on_err);
@@ -241,9 +267,16 @@ int main() {
     // ... 다른 작업 수행 ...
     Bn3Monkey::closeProcess(client, pid);   // 프로세스 종료 및 정리 대기
 
-    Bn3Monkey::releaseRemoteCommandContext(client);
+    Bn3Monkey::releaseRemoteCommandClient(client);
     return 0;
 }
+```
+
+사용 예시 (IP/포트를 이미 알고 있는 경우):
+
+```cpp
+// 탐색 없이 직접 연결
+auto* client = Bn3Monkey::createRemoteCommandClient(9001, 9002, "192.168.1.100");
 ```
 
 ### 서버도 함께 사용하는 경우
@@ -268,36 +301,36 @@ set_target_properties(your_server_target PROPERTIES
 
 ## 서버 바이너리 빌드
 
-`prj/` 디렉터리의 CMakeLists.txt가 루트를 `add_subdirectory`로 포함하여
-서버 실행 파일을 빌드합니다.
+`prj/` 디렉터리의 CMakeLists.txt가 루트를 `add_subdirectory`로 포함하여 서버 실행 파일을 빌드합니다.
 
 ```bash
 # prj/ 를 루트로 빌드
 cmake -S prj -B prj/build
 cmake --build prj/build
 
-# 실행 (기본 포트 9001/9002, 작업 디렉터리 현재 경로)
+# 실행 (기본 포트: discovery=9000, command=9001, stream=9002)
 ./prj/build/remote_command_server_app
 
 # 포트와 작업 디렉터리 지정
-./prj/build/remote_command_server_app 9001 9002 /home/user/workspace
+./prj/build/remote_command_server_app 9000 9001 9002 /home/user/workspace
 ```
 
 ```
-사용법: remote_command_server_app [command_port] [stream_port] [working_directory]
-  command_port      : 요청/응답 소켓 포트 (기본값: 9001)
-  stream_port       : stdout/stderr 스트림 소켓 포트 (기본값: 9002)
-  working_directory : 서버 초기 작업 디렉터리 (기본값: 현재 디렉터리)
+사용법: remote_command_server_app [discovery_port] [command_port] [stream_port] [working_directory]
+  discovery_port    : UDP 탐색 포트                         (기본값: 9000)
+  command_port      : 요청/응답 소켓 포트                   (기본값: 9001)
+  stream_port       : stdout/stderr 스트림 소켓 포트        (기본값: 9002)
+  working_directory : 서버 초기 작업 디렉터리               (기본값: 현재 디렉터리)
 ```
 
-서버는 백그라운드 스레드에서 비동기적으로 클라이언트 접속을 대기합니다. 클라이언트가 연결되면 IP:포트가 출력되고, 연결이 끊어지면 `openProcess`로 시작된 프로세스를 자동으로 kill하고 정리한 뒤 다음 클라이언트를 기다립니다.
+서버는 백그라운드 스레드에서 비동기적으로 클라이언트 접속을 대기합니다. UDP 탐색 서비스도 병렬로 동작하여 클라이언트가 서버를 자동으로 찾을 수 있습니다. 클라이언트가 연결되면 IP:포트가 출력되고, 연결이 끊어지면 `openProcess`로 시작된 프로세스를 자동으로 kill하고 정리한 뒤 다음 클라이언트를 기다립니다.
 `Ctrl+C`(SIGINT) 또는 SIGTERM으로 정상 종료됩니다.
 
 ---
 
 ## 통합 테스트 빌드
 
-테스트는 Google Test를 사용하며 **네트워크 포트 19001, 19002**를 사용합니다.
+테스트는 Google Test를 사용하며 **네트워크 포트 19001, 19002, 19003**을 사용합니다.
 
 ```bash
 # 루트에서 테스트 포함 빌드
@@ -327,6 +360,8 @@ cd build && ctest --output-on-failure
 | `Integration.openProcess_and_closeProcess` | 장시간 프로세스를 정상 종료; 이중 closeProcess는 no-op |
 | `Integration.openProcess_output` | 단발성 프로세스의 stdout을 스트림 콜백으로 캡처 |
 
+각 테스트의 `SetUp`은 `discoverRemoteCommandClient`로 연결하고, `getRemoteCommandServerAddress`로 반환된 서버 IP가 비어 있지 않은지 검증합니다.
+
 ---
 
 ## API 레퍼런스
@@ -334,13 +369,19 @@ cd build && ctest --output-on-failure
 ### 클라이언트 생성 / 해제
 
 ```cpp
-// ip 기본값은 "127.0.0.1"
-RemoteCommandClient* createRemoteCommandContext(
+// UDP 탐색으로 서버를 찾아 연결 (응답이 올 때까지 블로킹)
+RemoteCommandClient* discoverRemoteCommandClient(int32_t discovery_port);
+
+// IP와 포트를 이미 알고 있을 때 직접 연결 (ip 기본값: "127.0.0.1")
+RemoteCommandClient* createRemoteCommandClient(
     int32_t     command_port,
     int32_t     stream_port,
     const char* ip = "127.0.0.1");
 
-void releaseRemoteCommandContext(RemoteCommandClient* client);
+void releaseRemoteCommandClient(RemoteCommandClient* client);
+
+// 연결된 서버의 IP 주소 반환
+const char* getRemoteCommandServerAddress(RemoteCommandClient* client);
 ```
 
 ### 콜백
@@ -417,13 +458,15 @@ void closeProcess(RemoteCommandClient* client, int32_t process_id);
 ### 서버
 
 ```cpp
-// 비블로킹: 소켓을 생성하고 백그라운드 스레드에서 accept 루프를 시작한 뒤 즉시 반환
+// 비블로킹: 소켓과 UDP 탐색 서비스를 생성하고
+// 백그라운드 스레드에서 accept 루프를 시작한 뒤 즉시 반환
 RemoteCommandServer* openRemoteCommandServer(
+    int32_t     discovery_port,
     int32_t     command_port,
     int32_t     stream_port,
     const char* current_working_directory = ".");
 
-// 블로킹: 서버 스레드 종료 신호 후 join 완료까지 대기
+// 블로킹: 모든 백그라운드 스레드에 종료 신호를 보내고 join 완료까지 대기
 void closeRemoteCommandServer(RemoteCommandServer* server);
 ```
 

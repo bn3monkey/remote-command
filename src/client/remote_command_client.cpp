@@ -1,6 +1,8 @@
 #include "../../include/remote_command_client.hpp"
 #include "../protocol/remote_command_protocol.hpp"
 
+#include <kiotty_discovery_client.hpp>
+
 #include <cstring>
 #include <vector>
 #include <thread>
@@ -36,6 +38,7 @@ namespace Bn3Monkey
     // -------------------------------------------------------------------------
     struct RemoteCommandClient
     {
+        char ip[32] {0};
         sock_t          command_sock  { INVALID_SOCK };
         sock_t          stream_sock   { INVALID_SOCK };
         OnRemoteOutput  on_remote_output { nullptr };
@@ -214,7 +217,34 @@ namespace Bn3Monkey
     // Public API
     // =========================================================================
 
-    RemoteCommandClient* createRemoteCommandContext(int32_t command_port, int32_t stream_port, const char* ip)
+    RemoteCommandClient* discoverRemoteCommandClient(int32_t discovery_port)
+    {
+        auto* result = KiottyDiscoveryClient_discoverServer(discovery_port);
+        if (!result) return nullptr;
+
+        auto* ip = KiottyDiscoveryClient_getIpAddress(result);
+
+        int32_t command_port{ 0 };
+        int32_t stream_port{ 0 };
+        auto num_of_endpoints = KiottyDiscoveryClient_getNumOfEndpoints(result);
+        for (auto i = 0; i < num_of_endpoints; i++) {
+			auto port = KiottyDiscoveryClient_getPort(result, i);
+            auto description = KiottyDiscoveryClient_getPortDescription(result, i);
+
+            if (!strcmp(description, PORT_STREAM))
+            {
+                stream_port = port;
+            }
+            else if (!strcmp(description, PORT_COMMAND))
+            {
+                command_port = port;
+            }
+        }
+
+		return createRemoteCommandClient(command_port, stream_port, ip);
+    }
+
+    RemoteCommandClient* createRemoteCommandClient(int32_t command_port, int32_t stream_port, const char* ip)
     {
 #ifdef _WIN32
         WSADATA wsa;
@@ -222,6 +252,7 @@ namespace Bn3Monkey
 #endif
         const char* host = (ip && ip[0] != '\0') ? ip : "127.0.0.1";
         auto* client = new RemoteCommandClient();
+        snprintf(client->ip, sizeof(client->ip), "%s", host);
 
         client->command_sock = connectToServer(host, command_port);
         if (client->command_sock == INVALID_SOCK) {
@@ -247,7 +278,12 @@ namespace Bn3Monkey
         return client;
     }
 
-    void releaseRemoteCommandContext(RemoteCommandClient* client)
+    const char* getRemoteCommandServerAddress(RemoteCommandClient* client)
+    {
+        return client->ip;
+    }
+
+    void releaseRemoteCommandClient(RemoteCommandClient* client)
     {
         if (!client) return;
 

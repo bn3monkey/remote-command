@@ -11,6 +11,8 @@
 #include <filesystem>
 #include <fstream>
 
+#include <kiotty_discovery_server.hpp>
+
 #ifdef _WIN32
 #  ifndef WIN32_LEAN_AND_MEAN
 #    define WIN32_LEAN_AND_MEAN
@@ -70,6 +72,10 @@ namespace Bn3Monkey
         std::mutex                                            stream_mutex;
         std::map<int32_t, std::shared_ptr<OpenProcessEntry>> open_processes;
         int32_t                                               next_pid {1};
+
+		KiottyDiscoveryServer* discovery_server{ nullptr };
+        std::thread discovery_message_thread;
+		std::atomic<bool> discovery_running{ false };
 
         RemoteCommandServer() : running(false) {}
     };
@@ -824,11 +830,25 @@ namespace Bn3Monkey
         return sock;
     }
 
+
+    static void handleDiscoverMessage(RemoteCommandServer* server)
+    {
+        do {
+            while (auto* message = KiottyDiscoveryServer_awaitMessage(server->discovery_server, 50000))
+            {
+                auto* str = KiottyDiscoveryServer_getMessage(message);
+                printf("[Discovery] %s\n", str);
+            }
+        } while (server->discovery_running);
+	}
+
     // =========================================================================
     // Public API
     // =========================================================================
 
-    RemoteCommandServer* openRemoteCommandServer(int32_t command_port,
+    RemoteCommandServer* openRemoteCommandServer(
+                                                int32_t discovery_port,
+                                                int32_t command_port,
                                                  int32_t stream_port,
                                                  const char* current_working_directory)
     {
@@ -866,6 +886,16 @@ namespace Bn3Monkey
             WSACleanup();
 #endif
             return nullptr;
+        }
+
+        server->discovery_server = KiottyDiscoveryServer_createServer(discovery_port);
+        if (server->discovery_server) {
+            KiottyDiscoveryServer_addPort(server->discovery_server, command_port, PORT_COMMAND);
+            KiottyDiscoveryServer_addPort(server->discovery_server, stream_port, PORT_STREAM);
+            KiottyDiscoveryServer_openServer(server->discovery_server);
+
+            server->discovery_running.store(true);
+            server->discovery_message_thread = std::thread(handleDiscoverMessage, server);
         }
 
         // Start the async accept + request-handling loop.
@@ -906,6 +936,13 @@ namespace Bn3Monkey
             closeSocket(server->command_server_sock);
         if (server->stream_server_sock != INVALID_SOCK)
             closeSocket(server->stream_server_sock);
+
+        if (server->discovery_server) {
+            server->discovery_running.store(false);
+			KiottyDiscoveryServer_cancelMessage(server->discovery_server);
+            server->discovery_message_thread.join();
+            KiottyDiscoveryServer_releaseServer(server->discovery_server);
+        }
 
         delete server;
 #ifdef _WIN32

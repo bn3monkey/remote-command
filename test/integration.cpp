@@ -48,8 +48,9 @@ static void onError(const char* msg)
 class Integration : public ::testing::Test
 {
 protected:
-    static constexpr int CMD_PORT = 19001;
-    static constexpr int STR_PORT = 19002;
+    static constexpr int DISC_PORT = 19003;
+    static constexpr int CMD_PORT  = 19001;
+    static constexpr int STR_PORT  = 19002;
 
     RemoteCommandServer* server = nullptr;
     RemoteCommandClient* client = nullptr;
@@ -72,13 +73,20 @@ protected:
 
         // openRemoteCommandServer creates/binds/listens and returns immediately.
         // Sockets are already in LISTEN state when the call returns.
-        server = openRemoteCommandServer(CMD_PORT, STR_PORT, test_dir.string().c_str());
+        server = openRemoteCommandServer(DISC_PORT, CMD_PORT, STR_PORT, test_dir.string().c_str());
         ASSERT_NE(server, nullptr) << "Failed to start server";
 
-        // Connect client — the OS queues the connection in the listen backlog,
-        // so no sleep is needed before connecting.
-        client = createRemoteCommandContext(CMD_PORT, STR_PORT);
-        ASSERT_NE(client, nullptr) << "Client failed to connect to server";
+        // Connect client via UDP discovery — discoverRemoteCommandContext blocks
+        // until it receives a response from the server's discovery service.
+        client = discoverRemoteCommandClient(DISC_PORT);
+        ASSERT_NE(client, nullptr) << "Client failed to discover/connect to server";
+
+        // Verify the discovered server address is valid
+        const char* server_ip = getRemoteCommandServerAddress(client);
+        ASSERT_NE(server_ip, nullptr) << "Server IP should not be null";
+        ASSERT_NE(std::string(server_ip), "") << "Server IP should not be empty";
+        std::printf("  Discovered server IP : %s\n", server_ip);
+        std::fflush(stdout);
 
         // Give serverThread time to accept() the queued connection and enter
         // handleRequests() before the test body starts issuing commands.
@@ -94,7 +102,7 @@ protected:
         // Release client first — closes its sockets, causing handleRequests()
         // to exit (recv returns 0), and the serverThread loops back to accept.
         if (client) {
-            releaseRemoteCommandContext(client);
+            releaseRemoteCommandClient(client);
             client = nullptr;
         }
 

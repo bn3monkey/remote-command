@@ -1,6 +1,6 @@
 # remote-command
 
-A C++ library for sending commands to a remote process, transferring files, and receiving stdout/stderr streams in real time over two separate TCP sockets.
+A C++ library for sending commands to a remote process, transferring files, and receiving stdout/stderr streams in real time over two separate TCP sockets. Supports automatic server discovery via UDP.
 
 ---
 
@@ -24,15 +24,21 @@ A C++ library for sending commands to a remote process, transferring files, and 
 ```
 [Client Process]                      [Server Process]
                                        (remote or local)
-  createRemoteCommandContext()
+  discoverRemoteCommandClient()
+        │
+        ├─── UDP broadcast ──────────▶ KiottyDiscovery (discovery port)
+        │◀── server IP + ports ───────
         │
         ├─── command_sock (TCP) ──────▶ request / response  (synchronous)
         │
         └─── stream_sock  (TCP) ◀────── stdout / stderr     (asynchronous push)
 ```
 
-The client sends requests over the command socket and waits synchronously for responses.
+The client locates the server via UDP discovery, then opens two TCP connections.
+Requests are sent over the command socket and responses are received synchronously.
 While the server executes a command, stdout and stderr are pushed asynchronously to the client over the stream socket.
+
+If the server IP and ports are already known, you can skip discovery and connect directly.
 
 ---
 
@@ -44,6 +50,12 @@ While the server executes a command, stdout and stderr are pushed asynchronously
 | `remote_command_server` | static lib (C++17) | Receive commands, execute them, stream output |
 | `remote_command_server_app` | executable | Stand-alone server binary (`prj/`) |
 | `integration_test` | executable | Integration test suite (Google Test) |
+
+**Dependencies**
+
+| Library | Source | Used by |
+|---------|--------|---------|
+| [`kiotty_discover`](https://github.com/kiotty/kiotty-discovery) | FetchContent (tag `1.0.0`) | client + server |
 
 **Source tree**
 
@@ -70,6 +82,16 @@ remote-command/
 ---
 
 ## Features
+
+### Server Discovery
+
+| Function | Description |
+|----------|-------------|
+| `discoverRemoteCommandClient(discovery_port)` | Broadcast a UDP discovery request and wait for the server to respond. Returns a connected client. |
+| `getRemoteCommandServerAddress(client)` | Return the IP address string of the connected server. |
+
+- `discoverRemoteCommandClient` **blocks** until a response is received from the server.
+- Discovery uses the [`kiotty_discover`](https://github.com/kiotty/kiotty-discovery) library.
 
 ### Directory Operations
 
@@ -187,6 +209,8 @@ Requires C++17 or later due to `std::filesystem`.
 
 ## CMake Integration (FetchContent)
 
+The `kiotty_discover` dependency is fetched automatically by the root `CMakeLists.txt`; no manual step is required.
+
 ### Client only
 
 Use this when you only need to send commands to a remote server.
@@ -210,7 +234,7 @@ target_link_libraries(your_target
 )
 ```
 
-Usage example:
+Usage example (with discovery):
 
 ```cpp
 #include <remote_command_client.hpp>
@@ -219,8 +243,11 @@ static void on_out(const char* msg) { printf("%s", msg); }
 static void on_err(const char* msg) { fprintf(stderr, "%s", msg); }
 
 int main() {
-    auto* client = Bn3Monkey::createRemoteCommandContext(9001, 9002, "192.168.1.100");
+    // Discover the server on the local network via UDP
+    auto* client = Bn3Monkey::discoverRemoteCommandClient(9000);
     if (!client) return 1;
+
+    printf("Connected to: %s\n", Bn3Monkey::getRemoteCommandServerAddress(client));
 
     Bn3Monkey::onRemoteOutput(client, on_out);
     Bn3Monkey::onRemoteError (client, on_err);
@@ -242,9 +269,16 @@ int main() {
     // ... do other work ...
     Bn3Monkey::closeProcess(client, pid);   // terminates and waits for cleanup
 
-    Bn3Monkey::releaseRemoteCommandContext(client);
+    Bn3Monkey::releaseRemoteCommandClient(client);
     return 0;
 }
+```
+
+Usage example (direct connection, without discovery):
+
+```cpp
+// Connect directly if IP and ports are already known
+auto* client = Bn3Monkey::createRemoteCommandClient(9001, 9002, "192.168.1.100");
 ```
 
 ### Client + Server
@@ -276,28 +310,29 @@ The `prj/` CMakeLists.txt includes the root via `add_subdirectory` and builds th
 cmake -S prj -B prj/build
 cmake --build prj/build
 
-# Run with default ports (9001/9002) and current directory as CWD
+# Run with default ports (discovery=9000, command=9001, stream=9002)
 ./prj/build/remote_command_server_app
 
 # Specify ports and working directory
-./prj/build/remote_command_server_app 9001 9002 /home/user/workspace
+./prj/build/remote_command_server_app 9000 9001 9002 /home/user/workspace
 ```
 
 ```
-Usage: remote_command_server_app [command_port] [stream_port] [working_directory]
-  command_port      : request/response socket port     (default: 9001)
-  stream_port       : stdout/stderr stream socket port (default: 9002)
-  working_directory : server initial working directory (default: current directory)
+Usage: remote_command_server_app [discovery_port] [command_port] [stream_port] [working_directory]
+  discovery_port    : UDP discovery port                        (default: 9000)
+  command_port      : request/response socket port             (default: 9001)
+  stream_port       : stdout/stderr stream socket port         (default: 9002)
+  working_directory : server initial working directory         (default: current directory)
 ```
 
-The server accepts connections asynchronously in a background thread. When a client connects, its IP and port are printed. When it disconnects, any processes started with `openProcess` are automatically killed and cleaned up before the server waits for the next client.
+The server accepts connections asynchronously in a background thread. A UDP discovery service runs in parallel so clients can locate the server automatically. When a client connects, its IP and port are printed. When it disconnects, any processes started with `openProcess` are automatically killed and cleaned up before the server waits for the next client.
 It shuts down gracefully on `Ctrl+C` (SIGINT) or SIGTERM.
 
 ---
 
 ## Building the Integration Tests
 
-The tests use Google Test and occupy **ports 19001 and 19002** on localhost.
+The tests use Google Test and occupy **ports 19001, 19002, and 19003** on localhost.
 
 ```bash
 # Build with tests enabled (from the repository root)
@@ -327,6 +362,8 @@ cd build && ctest --output-on-failure
 | `Integration.openProcess_and_closeProcess` | Long-running process is terminated cleanly; double-close is a no-op |
 | `Integration.openProcess_output` | stdout from a short process is captured via the stream callback |
 
+Each test's `SetUp` connects via `discoverRemoteCommandClient` and verifies the returned server IP is non-empty.
+
 ---
 
 ## API Reference
@@ -334,13 +371,19 @@ cd build && ctest --output-on-failure
 ### Client lifecycle
 
 ```cpp
-// ip defaults to "127.0.0.1"
-RemoteCommandClient* createRemoteCommandContext(
+// Discover server via UDP and connect (blocks until a response is received)
+RemoteCommandClient* discoverRemoteCommandClient(int32_t discovery_port);
+
+// Connect directly when IP and ports are already known (ip defaults to "127.0.0.1")
+RemoteCommandClient* createRemoteCommandClient(
     int32_t     command_port,
     int32_t     stream_port,
     const char* ip = "127.0.0.1");
 
-void releaseRemoteCommandContext(RemoteCommandClient* client);
+void releaseRemoteCommandClient(RemoteCommandClient* client);
+
+// Return the IP address of the connected server
+const char* getRemoteCommandServerAddress(RemoteCommandClient* client);
 ```
 
 ### Callbacks
@@ -417,14 +460,15 @@ void closeProcess(RemoteCommandClient* client, int32_t process_id);
 ### Server
 
 ```cpp
-// Non-blocking: creates sockets, starts the accept loop in a background thread,
-// and returns immediately.
+// Non-blocking: creates sockets, starts the accept loop and discovery service
+// in background threads, and returns immediately.
 RemoteCommandServer* openRemoteCommandServer(
+    int32_t     discovery_port,
     int32_t     command_port,
     int32_t     stream_port,
     const char* current_working_directory = ".");
 
-// Blocking: signals the server thread to stop, waits for it to join.
+// Blocking: signals all background threads to stop and waits for them to join.
 void closeRemoteCommandServer(RemoteCommandServer* server);
 ```
 

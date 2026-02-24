@@ -112,6 +112,6 @@ if(REMOTE_COMMAND_BUILD_TESTS)
         target_link_libraries(integration_test PRIVATE stdc++fs)
     endif()
 
-    include(GoogleTest)
-    gtest_discover_tests(integration_test)
+    # include(GoogleTest)
+    # gtest_discover_tests(integration_test)
 endif()

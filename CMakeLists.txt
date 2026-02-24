@@ -8,6 +8,7 @@ project(remote-command C CXX)
 #   Consumer can FetchContent this repo and link against this target.
 # ---------------------------------------------------------------------------
 add_library(remote_command_client STATIC
+    include/remote_command_client.hpp
     src/client/remote_command_client.cpp
 )
 
@@ -31,6 +32,7 @@ endif()
 #   Uses std::filesystem; must be compiled with C++17 or later.
 # ---------------------------------------------------------------------------
 add_library(remote_command_server STATIC
+    include/remote_command_server.hpp
     src/server/remote_command_server.cpp
 )
 

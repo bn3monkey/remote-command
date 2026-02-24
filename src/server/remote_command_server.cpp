@@ -6,6 +6,8 @@
 #include <vector>
 #include <thread>
 #include <atomic>
+#include <mutex>
+#include <map>
 #include <filesystem>
 #include <fstream>
 
@@ -25,6 +27,7 @@
 #  include <arpa/inet.h>
 #  include <unistd.h>
 #  include <sys/wait.h>
+#  include <signal.h>
    typedef int sock_t;
    static const sock_t INVALID_SOCK = -1;
    static void closeSocket(sock_t s) { close(s); }
@@ -34,6 +37,20 @@ namespace fs = std::filesystem;
 
 namespace Bn3Monkey
 {
+    // -------------------------------------------------------------------------
+    // Represents one process started via openProcess()
+    // -------------------------------------------------------------------------
+    struct OpenProcessEntry {
+        int32_t id {-1};
+#ifdef _WIN32
+        HANDLE  hProcess {INVALID_HANDLE_VALUE};
+#else
+        pid_t   pid {-1};
+#endif
+        std::thread out_thread;
+        std::thread err_thread;
+    };
+
     // -------------------------------------------------------------------------
     // Internal struct (opaque from the header)
     // -------------------------------------------------------------------------
@@ -47,6 +64,12 @@ namespace Bn3Monkey
         std::string       current_directory;
         std::thread       server_thread;     // accept loop + request handler
         std::atomic<bool> running;
+
+        // Stream socket is shared by runCommand (sync) and openProcess IO threads
+        // (async); protect every write to it with this mutex.
+        std::mutex                                            stream_mutex;
+        std::map<int32_t, std::shared_ptr<OpenProcessEntry>> open_processes;
+        int32_t                                               next_pid {1};
 
         RemoteCommandServer() : running(false) {}
     };
@@ -91,7 +114,9 @@ namespace Bn3Monkey
     }
 
     // -------------------------------------------------------------------------
-    // Send a stream chunk (stdout or stderr) to the stream socket
+    // Send a stream chunk (stdout or stderr) to the stream socket.
+    // The Locked variant serialises concurrent writes (openProcess IO threads
+    // and runCommand IO threads may run simultaneously).
     // -------------------------------------------------------------------------
     static void sendStream(sock_t stream_sock,
                            RemoteCommandStreamType type,
@@ -104,12 +129,26 @@ namespace Bn3Monkey
         sendAll(stream_sock, data,    len);
     }
 
+    static void sendStreamLocked(std::mutex& mtx,
+                                 sock_t stream_sock,
+                                 RemoteCommandStreamType type,
+                                 const char* data,
+                                 uint32_t len)
+    {
+        if (len == 0) return;
+        RemoteCommandStreamHeader header(type, len);
+        std::lock_guard<std::mutex> lk(mtx);
+        sendAll(stream_sock, &header, sizeof(header));
+        sendAll(stream_sock, data,    len);
+    }
+
     // -------------------------------------------------------------------------
     // Execute a shell command, streaming stdout/stderr to stream_sock.
     // Called from the handler thread (blocking until command finishes).
     // -------------------------------------------------------------------------
     static void executeCommand(const std::string& cmd,
                                sock_t stream_sock,
+                               std::mutex& stream_mutex,
                                const std::string& work_dir)
     {
 #ifdef _WIN32
@@ -156,12 +195,12 @@ namespace Bn3Monkey
         }
 
         // Read stdout and stderr in parallel threads
-        auto readPipe = [stream_sock](HANDLE h, RemoteCommandStreamType type) {
+        auto readPipe = [&stream_mutex, stream_sock](HANDLE h, RemoteCommandStreamType type) {
             char buf[4096];
             DWORD n = 0;
             while (ReadFile(h, buf, sizeof(buf) - 1, &n, nullptr) && n > 0) {
                 buf[n] = '\0';
-                sendStream(stream_sock, type, buf, n);
+                sendStreamLocked(stream_mutex, stream_sock, type, buf, n);
             }
             CloseHandle(h);
         };
@@ -210,12 +249,13 @@ namespace Bn3Monkey
             return;
         }
 
-        auto readPipe = [stream_sock](int fd, RemoteCommandStreamType type) {
+        auto readPipe = [&stream_mutex, stream_sock](int fd, RemoteCommandStreamType type) {
             char buf[4096];
             ssize_t n;
             while ((n = read(fd, buf, sizeof(buf) - 1)) > 0) {
                 buf[n] = '\0';
-                sendStream(stream_sock, type, buf, static_cast<uint32_t>(n));
+                sendStreamLocked(stream_mutex, stream_sock, type,
+                                 buf, static_cast<uint32_t>(n));
             }
             close(fd);
         };
@@ -276,6 +316,175 @@ namespace Bn3Monkey
             }
         }
         return INVALID_SOCK;
+    }
+
+    // -------------------------------------------------------------------------
+    // Kill an open process and join its IO threads.
+    // Safe to call if the process already exited naturally.
+    // -------------------------------------------------------------------------
+    static void killOpenProcess(OpenProcessEntry& entry)
+    {
+#ifdef _WIN32
+        if (entry.hProcess != INVALID_HANDLE_VALUE) {
+            TerminateProcess(entry.hProcess, 0);
+            WaitForSingleObject(entry.hProcess, INFINITE);
+            CloseHandle(entry.hProcess);
+            entry.hProcess = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (entry.pid > 0) {
+            kill(entry.pid, SIGKILL);
+            waitpid(entry.pid, nullptr, 0);
+            entry.pid = -1;
+        }
+#endif
+        // Join IO threads — they exit when the process's pipe write-ends close
+        if (entry.out_thread.joinable()) entry.out_thread.join();
+        if (entry.err_thread.joinable()) entry.err_thread.join();
+    }
+
+    // -------------------------------------------------------------------------
+    // Start a new process, launch IO threads that stream its stdout/stderr,
+    // register in the server's map, and return the assigned process ID.
+    // Returns -1 on failure.
+    // -------------------------------------------------------------------------
+    static int32_t startOpenProcess(RemoteCommandServer* server,
+                                    const std::string&  cmd,
+                                    sock_t              stm_sock)
+    {
+        auto  entry    = std::make_shared<OpenProcessEntry>();
+        auto* mtx      = &server->stream_mutex;
+        const std::string work_dir = server->current_directory;
+
+#ifdef _WIN32
+        SECURITY_ATTRIBUTES sa {};
+        sa.nLength        = sizeof(sa);
+        sa.bInheritHandle = TRUE;
+
+        HANDLE stdout_r, stdout_w, stderr_r, stderr_w;
+        if (!CreatePipe(&stdout_r, &stdout_w, &sa, 0)) return -1;
+        if (!CreatePipe(&stderr_r, &stderr_w, &sa, 0)) {
+            CloseHandle(stdout_r); CloseHandle(stdout_w);
+            return -1;
+        }
+        SetHandleInformation(stdout_r, HANDLE_FLAG_INHERIT, 0);
+        SetHandleInformation(stderr_r, HANDLE_FLAG_INHERIT, 0);
+
+        std::string full_cmd = "cmd /c " + cmd;
+        std::vector<char> cmd_buf(full_cmd.begin(), full_cmd.end());
+        cmd_buf.push_back('\0');
+
+        STARTUPINFOA si {};
+        si.cb         = sizeof(si);
+        si.hStdOutput = stdout_w;
+        si.hStdError  = stderr_w;
+        si.dwFlags    = STARTF_USESTDHANDLES;
+
+        PROCESS_INFORMATION pi {};
+        BOOL ok = CreateProcessA(
+            nullptr, cmd_buf.data(), nullptr, nullptr,
+            TRUE, CREATE_NO_WINDOW, nullptr,
+            work_dir.empty() ? nullptr : work_dir.c_str(),
+            &si, &pi);
+
+        CloseHandle(stdout_w);
+        CloseHandle(stderr_w);
+
+        if (!ok) {
+            CloseHandle(stdout_r);
+            CloseHandle(stderr_r);
+            return -1;
+        }
+        CloseHandle(pi.hThread);
+
+        entry->id       = server->next_pid++;
+        entry->hProcess = pi.hProcess;
+
+        HANDLE out_h = stdout_r;
+        HANDLE err_h = stderr_r;
+        entry->out_thread = std::thread([out_h, stm_sock, mtx]() {
+            char  buf[4096];
+            DWORD n = 0;
+            while (ReadFile(out_h, buf, sizeof(buf) - 1, &n, nullptr) && n > 0) {
+                buf[n] = '\0';
+                sendStreamLocked(*mtx, stm_sock,
+                                 RemoteCommandStreamType::STREAM_OUTPUT, buf, n);
+            }
+            CloseHandle(out_h);
+        });
+        entry->err_thread = std::thread([err_h, stm_sock, mtx]() {
+            char  buf[4096];
+            DWORD n = 0;
+            while (ReadFile(err_h, buf, sizeof(buf) - 1, &n, nullptr) && n > 0) {
+                buf[n] = '\0';
+                sendStreamLocked(*mtx, stm_sock,
+                                 RemoteCommandStreamType::STREAM_ERROR, buf, n);
+            }
+            CloseHandle(err_h);
+        });
+
+#else  // POSIX
+        int stdout_pipe[2], stderr_pipe[2];
+        if (pipe(stdout_pipe) != 0) return -1;
+        if (pipe(stderr_pipe) != 0) {
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            return -1;
+        }
+
+        pid_t child = fork();
+        if (child < 0) {
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            close(stderr_pipe[0]); close(stderr_pipe[1]);
+            return -1;
+        }
+        if (child == 0) {
+            // Child process
+            close(stdout_pipe[0]);
+            close(stderr_pipe[0]);
+            dup2(stdout_pipe[1], STDOUT_FILENO);
+            dup2(stderr_pipe[1], STDERR_FILENO);
+            close(stdout_pipe[1]);
+            close(stderr_pipe[1]);
+            if (!work_dir.empty()) chdir(work_dir.c_str());
+            execl("/bin/sh", "sh", "-c", cmd.c_str(), nullptr);
+            _exit(127);
+        }
+        // Parent
+        close(stdout_pipe[1]);
+        close(stderr_pipe[1]);
+
+        entry->id  = server->next_pid++;
+        entry->pid = child;
+
+        int out_fd = stdout_pipe[0];
+        int err_fd = stderr_pipe[0];
+        entry->out_thread = std::thread([out_fd, stm_sock, mtx]() {
+            char    buf[4096];
+            ssize_t n;
+            while ((n = ::read(out_fd, buf, sizeof(buf) - 1)) > 0) {
+                buf[n] = '\0';
+                sendStreamLocked(*mtx, stm_sock,
+                                 RemoteCommandStreamType::STREAM_OUTPUT,
+                                 buf, static_cast<uint32_t>(n));
+            }
+            ::close(out_fd);
+        });
+        entry->err_thread = std::thread([err_fd, stm_sock, mtx]() {
+            char    buf[4096];
+            ssize_t n;
+            while ((n = ::read(err_fd, buf, sizeof(buf) - 1)) > 0) {
+                buf[n] = '\0';
+                sendStreamLocked(*mtx, stm_sock,
+                                 RemoteCommandStreamType::STREAM_ERROR,
+                                 buf, static_cast<uint32_t>(n));
+            }
+            ::close(err_fd);
+        });
+#endif
+
+        int32_t proc_id = entry->id;
+        server->open_processes[proc_id] = std::move(entry);
+        return proc_id;
     }
 
     // -------------------------------------------------------------------------
@@ -429,7 +638,37 @@ namespace Bn3Monkey
             case RemoteCommandInstruction::INSTRUCTION_RUN_COMMAND:
             {
                 // Execute, stream all output/error, then send empty response
-                executeCommand(p0, stm_sock, server->current_directory);
+                executeCommand(p0, stm_sock, server->stream_mutex,
+                               server->current_directory);
+                RemoteCommandResponseHeader resp(req_header.instruction, 0);
+                sendAll(cmd_sock, &resp, sizeof(resp));
+                break;
+            }
+            // -----------------------------------------------------------------
+            case RemoteCommandInstruction::INSTRUCTION_OPEN_PROCESS:
+            {
+                // p0 = command string; response = int32_t process ID (-1 on failure)
+                int32_t proc_id = startOpenProcess(server, p0, stm_sock);
+                RemoteCommandResponseHeader resp(req_header.instruction,
+                                                sizeof(int32_t));
+                sendAll(cmd_sock, &resp, sizeof(resp));
+                sendAll(cmd_sock, &proc_id, sizeof(proc_id));
+                break;
+            }
+            // -----------------------------------------------------------------
+            case RemoteCommandInstruction::INSTRUCTION_CLOSE_PROCESS:
+            {
+                // p0 = int32_t process ID (4 bytes)
+                int32_t proc_id = -1;
+                if (req_header.payload_0_length >= sizeof(int32_t))
+                    memcpy(&proc_id, p0.data(), sizeof(int32_t));
+
+                auto it = server->open_processes.find(proc_id);
+                if (it != server->open_processes.end()) {
+                    killOpenProcess(*it->second);
+                    server->open_processes.erase(it);
+                }
+
                 RemoteCommandResponseHeader resp(req_header.instruction, 0);
                 sendAll(cmd_sock, &resp, sizeof(resp));
                 break;
@@ -528,6 +767,12 @@ namespace Bn3Monkey
 
             // --- Serve until client disconnects or server is stopped ---
             handleRequests(server);
+
+            // --- Kill any processes left running when client disconnected ---
+            for (auto& kv : server->open_processes)
+                killOpenProcess(*kv.second);
+            server->open_processes.clear();
+            server->next_pid = 1;
 
             // --- Log disconnection ---
             std::printf("[Server] Client disconnected : %s:%d\n", ip, peer_port);

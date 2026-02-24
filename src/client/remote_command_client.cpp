@@ -118,6 +118,17 @@ namespace Bn3Monkey
         return sendAll(sock, p1, len1);
     }
 
+    // raw binary payload_0 only (used by closeProcess)
+    static bool sendRequest(sock_t sock,
+                            RemoteCommandInstruction instruction,
+                            const void* p0_data, uint32_t p0_len)
+    {
+        RemoteCommandRequestHeader header(instruction, p0_len);
+        if (!sendAll(sock, &header, sizeof(header))) return false;
+        if (p0_len > 0 && !sendAll(sock, p0_data, p0_len)) return false;
+        return true;
+    }
+
     // string path + raw binary payload (used by uploadFile)
     static bool sendRequest(sock_t sock,
                             RemoteCommandInstruction instruction,
@@ -461,6 +472,46 @@ namespace Bn3Monkey
         if (payload.size() >= sizeof(bool))
             memcpy(&result, payload.data(), sizeof(bool));
         return result;
+    }
+
+    // -------------------------------------------------------------------------
+    // Process management
+    // -------------------------------------------------------------------------
+    int32_t openProcessImpl(RemoteCommandClient* client, const char* cmd)
+    {
+        if (!client || !cmd) return -1;
+
+        if (!sendRequest(client->command_sock,
+                         RemoteCommandInstruction::INSTRUCTION_OPEN_PROCESS,
+                         cmd))
+            return -1;
+
+        std::vector<char> payload;
+        if (!recvResponse(client->command_sock,
+                          RemoteCommandInstruction::INSTRUCTION_OPEN_PROCESS,
+                          payload))
+            return -1;
+
+        int32_t proc_id = -1;
+        if (payload.size() >= sizeof(int32_t))
+            memcpy(&proc_id, payload.data(), sizeof(int32_t));
+        return proc_id;
+    }
+
+    void closeProcess(RemoteCommandClient* client, int32_t process_id)
+    {
+        if (!client) return;
+
+        if (!sendRequest(client->command_sock,
+                         RemoteCommandInstruction::INSTRUCTION_CLOSE_PROCESS,
+                         &process_id, static_cast<uint32_t>(sizeof(process_id))))
+            return;
+
+        std::vector<char> payload;
+        recvResponse(client->command_sock,
+                     RemoteCommandInstruction::INSTRUCTION_CLOSE_PROCESS,
+                     payload);
+        // void return — just wait for the server's acknowledgement
     }
 
     // -------------------------------------------------------------------------

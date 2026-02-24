@@ -50,6 +50,15 @@ namespace Bn3Monkey
         runCommandImpl(client, buffer);
     }
 
+    int32_t openProcessImpl(RemoteCommandClient* client, const char* cmd);
+    template<typename ...Args>
+    int32_t openProcess(RemoteCommandClient* client, const char* fmt, Args... args)
+    {
+        char buffer[4096] {0};
+        snprintf(buffer, sizeof(buffer), fmt, args...);
+        return openProcessImpl(client, buffer);
+    }    
+    void closeProcess(RemoteCommandClient* client, int32_t process_id);
 }
 
 #endif // __BN3MONKEY_REMOTE_COMMAND_CLIENT__

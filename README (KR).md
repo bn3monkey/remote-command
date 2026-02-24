@@ -1,6 +1,6 @@
 # remote-command
 
-TCP 소켓 두 개를 이용해 원격 프로세스에 명령을 내리고, stdout/stderr 스트림을 실시간으로 수신하는 C++ 라이브러리입니다.
+TCP 소켓 두 개를 이용해 원격 프로세스에 명령을 내리고, 파일을 주고받으며, stdout/stderr 스트림을 실시간으로 수신하는 C++ 라이브러리입니다.
 
 ---
 
@@ -84,15 +84,31 @@ remote-command/
 | `copyDirectory(client, from, to)` | 디렉터리 재귀 복사 |
 | `moveDirectory(client, from, to)` | 디렉터리 이동/이름 변경 |
 
+### 파일 전송
+
+| 함수 | 설명 |
+|------|------|
+| `uploadFile(client, local, remote)` | 로컬 파일을 서버 파일 시스템으로 전송 |
+| `downloadFile(client, local, remote)` | 서버 파일을 로컬 파일 시스템으로 수신 |
+
+- `local` / `remote` 경로 모두 절대 경로 또는 상대 경로를 사용할 수 있습니다.
+- 상대 경로는 remote 기준으로 **서버의 현재 작업 디렉터리**, local 기준으로 **클라이언트 프로세스의 CWD** 를 기준으로 해석됩니다.
+- `uploadFile`은 서버에서 상위 디렉터리를 자동으로 생성합니다.
+- 두 함수 모두 이진 데이터를 그대로 전송하므로 모든 파일 형식에 안전하게 사용할 수 있습니다.
+
 ### 명령 실행
 
 | 함수 | 설명 |
 |------|------|
-| `runCommand(client, fmt, ...)` | printf 형식 포맷 문자열로 명령 실행 |
-| `runCommandImpl(client, cmd)` | 명령 문자열 직접 실행 |
+| `runCommand(client, fmt, ...)` | 명령 실행 — 완료까지 **블로킹** |
+| `runCommandImpl(client, cmd)` | 명령 문자열 직접 실행 — 완료까지 **블로킹** |
+| `openProcess(client, fmt, ...)` | 백그라운드 프로세스 시작 — **즉시 반환** (프로세스 ID 반환) |
+| `closeProcess(client, process_id)` | 백그라운드 프로세스 종료 — 정리 완료까지 **블로킹** |
 
-- `runCommand` / `runCommandImpl` 은 **명령 완료까지 블로킹**합니다.
-- 실행 중 stdout은 `onRemoteOutput` 콜백으로, stderr는 `onRemoteError` 콜백으로 비동기 전달됩니다.
+- `runCommand` / `runCommandImpl`은 실행 중 stdout을 `onRemoteOutput`, stderr를 `onRemoteError` 콜백으로 전달하면서 블로킹합니다.
+- `openProcess`도 백그라운드 프로세스가 실행되는 동안 동일한 콜백으로 출력을 스트리밍합니다.
+- 유효하지 않거나 이미 닫힌 ID로 `closeProcess`를 호출하면 아무 일도 일어나지 않습니다(safe no-op).
+- 클라이언트가 연결을 끊을 때 아직 실행 중인 백그라운드 프로세스가 있으면, 서버가 자동으로 모두 kill하고 정리합니다.
 
 ### 콜백 등록
 
@@ -114,14 +130,14 @@ Bn3Monkey::onRemoteError(client, [](const char* msg) {
 ### 동시성
 
 - **클라이언트 ↔ 서버 연결은 1:1입니다.** 서버는 한 번에 하나의 클라이언트만 처리합니다.
-- 동일 클라이언트에서 **`runCommand`를 동시에 여러 스레드에서 호출하면 안 됩니다.** command 소켓이 공유되므로 요청/응답이 뒤섞입니다.
-- 디렉터리 조작 함수들(`createDirectory` 등)도 마찬가지로 단일 스레드에서 순차 호출을 가정합니다.
+- **동일 클라이언트의 command 소켓 함수를 여러 스레드에서 동시에 호출하면 안 됩니다.** command 소켓은 공유 자원이며 스레드 안전하지 않아, 인터리브된 호출이 요청/응답을 오염시킬 수 있습니다.
+- `openProcess` IO 스레드와 `runCommand` IO 스레드가 stream 소켓에 동시에 쓸 수 있습니다. 서버는 내부 mutex로 쓰기를 직렬화하므로 스트림 패킷 자체는 손상되지 않지만, 서로 다른 프로세스의 청크가 순서 없이 섞여 수신될 수 있습니다.
 
 ### 스트림 순서 보장
 
 - stdout/stderr 데이터는 **stream 소켓**, 명령 완료 응답은 **command 소켓**을 통해 전달됩니다.
-- 두 TCP 연결은 독립적이므로, `runCommand` 반환 직후 일부 스트림 데이터가 클라이언트 측에서 아직 콜백으로 전달되지 않았을 수 있습니다.
-- 정확한 스트림 수신을 보장하려면 `runCommand` 반환 후 짧은 지연이 필요할 수 있습니다.
+- 두 TCP 연결은 독립적이므로, `runCommand` 또는 `closeProcess` 반환 직후 일부 스트림 데이터가 아직 콜백으로 전달되지 않았을 수 있습니다.
+- 정확한 스트림 수신을 보장하려면 반환 후 짧은 지연이 필요할 수 있습니다.
 
 ### 경로
 
@@ -198,20 +214,32 @@ target_link_libraries(your_target
 ```cpp
 #include <remote_command_client.hpp>
 
+static void on_out(const char* msg) { printf("%s", msg); }
+static void on_err(const char* msg) { fprintf(stderr, "%s", msg); }
+
 int main() {
     auto* client = Bn3Monkey::createRemoteCommandContext(9001, 9002, "192.168.1.100");
     if (!client) return 1;
 
-    Bn3Monkey::onRemoteOutput(client, [](const char* msg) { printf("%s", msg); });
-    Bn3Monkey::onRemoteError (client, [](const char* msg) { fprintf(stderr, "%s", msg); });
+    Bn3Monkey::onRemoteOutput(client, on_out);
+    Bn3Monkey::onRemoteError (client, on_err);
 
     // 디렉터리 조작
     const char* cwd = Bn3Monkey::currentWorkingDirectory(client);
     Bn3Monkey::createDirectory(client, "build");
 
-    // 명령 실행 (완료까지 블로킹)
+    // 파일 전송
+    Bn3Monkey::uploadFile(client, "local/config.json", "config.json");
+    Bn3Monkey::downloadFile(client, "result.tar.gz", "artifacts/result.tar.gz");
+
+    // 명령 실행 (완료까지 블로킹, stdout/stderr는 콜백으로 전달)
     Bn3Monkey::runCommand(client, "cmake -B build -S .");
     Bn3Monkey::runCommand(client, "cmake --build build -j%d", 4);
+
+    // 백그라운드 프로세스
+    int32_t pid = Bn3Monkey::openProcess(client, "./server_app --port 8080");
+    // ... 다른 작업 수행 ...
+    Bn3Monkey::closeProcess(client, pid);   // 프로세스 종료 및 정리 대기
 
     Bn3Monkey::releaseRemoteCommandContext(client);
     return 0;
@@ -226,7 +254,6 @@ int main() {
 ```cmake
 FetchContent_MakeAvailable(remote_command)
 
-# 서버를 내장하는 실행 파일
 target_link_libraries(your_server_target
     PRIVATE remote_command_server
 )
@@ -263,7 +290,7 @@ cmake --build prj/build
   working_directory : 서버 초기 작업 디렉터리 (기본값: 현재 디렉터리)
 ```
 
-서버는 클라이언트가 접속하면 처리를 시작하고, 클라이언트가 연결을 끊으면 다음 클라이언트를 기다립니다.
+서버는 백그라운드 스레드에서 비동기적으로 클라이언트 접속을 대기합니다. 클라이언트가 연결되면 IP:포트가 출력되고, 연결이 끊어지면 `openProcess`로 시작된 프로세스를 자동으로 kill하고 정리한 뒤 다음 클라이언트를 기다립니다.
 `Ctrl+C`(SIGINT) 또는 SIGTERM으로 정상 종료됩니다.
 
 ---
@@ -295,6 +322,10 @@ cd build && ctest --output-on-failure
 | `Integration.copyDirectory` | 원본 유지 + 사본 존재 확인 |
 | `Integration.moveDirectory` | 원본 소멸 + 사본 존재 확인 |
 | `Integration.runCommand` | stdout 캡처, 파일 생성, stderr 가시화 |
+| `Integration.uploadFile` | 파일 내용 왕복 검증; 로컬 파일 미존재 시 실패 |
+| `Integration.downloadFile` | 파일 내용 왕복 검증; 원격 파일 미존재 시 실패 |
+| `Integration.openProcess_and_closeProcess` | 장시간 프로세스를 정상 종료; 이중 closeProcess는 no-op |
+| `Integration.openProcess_output` | 단발성 프로세스의 stdout을 스트림 콜백으로 캡처 |
 
 ---
 
@@ -305,8 +336,8 @@ cd build && ctest --output-on-failure
 ```cpp
 // ip 기본값은 "127.0.0.1"
 RemoteCommandClient* createRemoteCommandContext(
-    int32_t command_port,
-    int32_t stream_port,
+    int32_t     command_port,
+    int32_t     stream_port,
     const char* ip = "127.0.0.1");
 
 void releaseRemoteCommandContext(RemoteCommandClient* client);
@@ -349,30 +380,52 @@ struct RemoteDirectoryContent {
 };
 ```
 
+### 파일 전송
+
+```cpp
+// 로컬 파일을 서버로 업로드 (상위 디렉터리 자동 생성)
+bool uploadFile(RemoteCommandClient* client,
+                const char* local_file,
+                const char* remote_file);
+
+// 서버 파일을 로컬로 다운로드
+bool downloadFile(RemoteCommandClient* client,
+                  const char* local_file,
+                  const char* remote_file);
+```
+
+두 함수 모두 성공 시 `true`, 실패 시(파일 미존재, I/O 오류 등) `false`를 반환합니다.
+
 ### 명령 실행
 
 ```cpp
-// printf 형식 포맷 지원 (C++11 가변 인자 템플릿)
+// 블로킹: 명령 완료까지 대기 (printf 형식 포맷 지원)
 template<typename... Args>
 void runCommand(RemoteCommandClient* client, const char* fmt, Args... args);
 
-// 포맷 없이 직접 전달
+// 블로킹: 명령 완료까지 대기 (포맷 없이 직접 전달)
 void runCommandImpl(RemoteCommandClient* client, const char* cmd);
+
+// 비블로킹: 백그라운드 프로세스 시작 후 즉시 반환 (실패 시 -1)
+template<typename... Args>
+int32_t openProcess(RemoteCommandClient* client, const char* fmt, Args... args);
+
+// 블로킹: 백그라운드 프로세스 종료 및 정리 완료까지 대기
+void closeProcess(RemoteCommandClient* client, int32_t process_id);
 ```
 
 ### 서버
 
 ```cpp
-// current_working_directory 기본값은 "." (프로세스 CWD)
+// 비블로킹: 소켓을 생성하고 백그라운드 스레드에서 accept 루프를 시작한 뒤 즉시 반환
 RemoteCommandServer* openRemoteCommandServer(
-    int32_t command_port,
-    int32_t stream_port,
+    int32_t     command_port,
+    int32_t     stream_port,
     const char* current_working_directory = ".");
 
+// 블로킹: 서버 스레드 종료 신호 후 join 완료까지 대기
 void closeRemoteCommandServer(RemoteCommandServer* server);
 ```
-
-`openRemoteCommandServer`는 클라이언트의 접속을 수락할 때까지 **블로킹**합니다.
 
 ---
 
@@ -402,11 +455,25 @@ Response:
     payload_length[4]
     padding[4]
   [payload : payload_length bytes]
-    CURRENT_WORKING_DIRECTORY  → 경로 문자열
-    LIST_DIRECTORY_CONTENTS    → uint32 count + RemoteDirectoryContentInner[]
-    RUN_COMMAND                → (없음, 0 bytes)
-    그 외                      → bool (1 byte)
 ```
+
+instruction별 페이로드 구성:
+
+| Instruction | 요청 페이로드 | 응답 페이로드 |
+|-------------|-------------|-------------|
+| `CURRENT_WORKING_DIRECTORY` | — | 경로 문자열 |
+| `MOVE_CURRENT_WORKING_DIRECTORY` | p0: 새 경로 | bool |
+| `DIRECTORY_EXISTS` | p0: 경로 | bool |
+| `LIST_DIRECTORY_CONTENTS` | p0: 경로 | uint32 count + `RemoteDirectoryContentInner[]` |
+| `CREATE_DIRECTORY` | p0: 경로 | bool |
+| `REMOVE_DIRECTORY` | p0: 경로 | bool |
+| `COPY_DIRECTORY` | p0: from, p1: to | bool |
+| `MOVE_DIRECTORY` | p0: from, p1: to | bool |
+| `RUN_COMMAND` | p0: 명령 문자열 | — (0 bytes, 완료 신호) |
+| `OPEN_PROCESS` | p0: 명령 문자열 | int32_t 프로세스 ID (실패 시 −1) |
+| `CLOSE_PROCESS` | p0: int32_t 프로세스 ID (이진) | — (0 bytes, 정리 완료 신호) |
+| `UPLOAD_FILE` | p0: 원격 경로, p1: 파일 데이터 (이진) | bool |
+| `DOWNLOAD_FILE` | p0: 원격 경로 | 성공: `0x01` + 파일 데이터; 실패: `0x00` |
 
 ### Stream 소켓 (서버 → 클라이언트 단방향)
 
@@ -418,3 +485,5 @@ Response:
   padding[4]
 [payload : payload_length bytes]  ← null-terminated string
 ```
+
+`runCommand`와 `openProcess` 모두 이 소켓으로 출력을 전달합니다. 여러 백그라운드 프로세스가 동시에 출력을 보낼 때 서버는 내부 mutex로 쓰기를 직렬화하여 개별 스트림 패킷의 무결성을 보장합니다.

@@ -384,3 +384,52 @@ TEST_F(Integration, downloadFile)
     std::error_code ec;
     fs::remove(local_dst, ec);
 }
+
+// ---------------------------------------------------------------------------
+TEST_F(Integration, openProcess_and_closeProcess)
+{
+    // Start a long-running process that will NOT finish during the test
+#ifdef _WIN32
+    int32_t pid = openProcess(client, "ping -n 20 127.0.0.1");
+#else
+    int32_t pid = openProcess(client, "sleep 5");
+#endif
+    EXPECT_GT(pid, 0) << "openProcess should return a positive ID";
+
+    // Let it run briefly
+    std::this_thread::sleep_for(std::chrono::milliseconds(200));
+
+    // closeProcess should terminate it and block until cleanup is done
+    closeProcess(client, pid);
+
+    // Calling closeProcess on an already-closed or unknown ID must be a no-op
+    closeProcess(client, pid);  // second call on same ID
+    closeProcess(client, -1);   // invalid ID
+}
+
+// ---------------------------------------------------------------------------
+TEST_F(Integration, openProcess_output)
+{
+    {
+        std::lock_guard<std::mutex> lk(g_buf_mutex);
+        g_stdout_buf.clear();
+        g_stderr_buf.clear();
+    }
+
+    // Start a quick process that prints one line then exits
+    int32_t pid = openProcess(client, "echo hello_from_openprocess");
+    EXPECT_GT(pid, 0) << "openProcess should return a positive ID";
+
+    // Wait long enough for the process to finish and stream to deliver
+    flushStream();
+
+    // closeProcess is graceful even if the process already exited
+    closeProcess(client, pid);
+
+    {
+        std::lock_guard<std::mutex> lk(g_buf_mutex);
+        std::printf("  Captured stdout: [%s]\n", g_stdout_buf.c_str());
+        EXPECT_NE(g_stdout_buf.find("hello_from_openprocess"), std::string::npos)
+            << "stdout should contain 'hello_from_openprocess'";
+    }
+}

@@ -4,7 +4,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <vector>
-
+#include <cstdarg>
 // ---------------------------------------------------------------------------
 // Portable printf-format checking macros
 //
@@ -86,26 +86,27 @@ namespace Bn3Monkey
     bool downloadFile(RemoteCommandClient* client, const char* local_file, const char* remote_file);
 
     void runCommandImpl(RemoteCommandClient* client, const char* cmd);
+    int32_t openProcessImpl(RemoteCommandClient* client, const char* cmd);
 
-    template<typename ...Args>
     RC_PRINTF_FUNC(2, 3)
-    void runCommand(RemoteCommandClient* client, RC_PRINTF_STR const char* fmt, Args... args) {
-        char buffer[4096] {0};
-        RC_PUSH_NO_FMT
-        snprintf(buffer, sizeof(buffer), fmt, args...);
-        RC_POP_NO_FMT
+    inline void runCommand(RemoteCommandClient* client, RC_PRINTF_STR const char* fmt, ...)
+    {
+        char buffer[4096]{ 0 };
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buffer, sizeof(buffer), fmt, ap);
+        va_end(ap);
         runCommandImpl(client, buffer);
     }
 
-    int32_t openProcessImpl(RemoteCommandClient* client, const char* cmd);
-    template<typename ...Args>
     RC_PRINTF_FUNC(2, 3)
-    int32_t openProcess(RemoteCommandClient* client, RC_PRINTF_STR const char* fmt, Args... args)
+    inline int32_t openProcess(RemoteCommandClient* client, RC_PRINTF_STR const char* fmt, ...)
     {
-        char buffer[4096] {0};
-        RC_PUSH_NO_FMT
-        snprintf(buffer, sizeof(buffer), fmt, args...);
-        RC_POP_NO_FMT
+        char buffer[4096]{ 0 };
+        va_list ap;
+        va_start(ap, fmt);
+        vsnprintf(buffer, sizeof(buffer), fmt, ap);
+        va_end(ap);
         return openProcessImpl(client, buffer);
     }
 

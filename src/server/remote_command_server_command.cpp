@@ -177,7 +177,9 @@ namespace Bn3Monkey
             // -----------------------------------------------------------------
             case RemoteCommandInstruction::INSTRUCTION_OPEN_PROCESS:
             {
-                int32_t proc_id = _remote_process.execute(_current_directory.c_str(), p0.c_str());
+                // int32_t proc_id = _remote_process.execute(_current_directory.c_str(), p0.c_str());
+                int32_t proc_id = _remote_process.executeWithoutPipe(_current_directory.c_str(), p0.c_str());
+                
                 RemoteCommandResponseHeader resp(req.instruction, sizeof(int32_t));
                 sendAll(client_sock, &resp, sizeof(resp));
                 sendAll(client_sock, &proc_id, sizeof(proc_id));
@@ -190,9 +192,10 @@ namespace Bn3Monkey
                 if (req.payload_0_length >= sizeof(int32_t))
                     memcpy(&proc_id, p0.data(), sizeof(int32_t));
 
-                if (proc_id != -1)
-                    _remote_process.close(proc_id);
-
+                if (proc_id != -1) {
+                    // _remote_process.close(proc_id);
+                    _remote_process.closeWithoutPipe(proc_id);
+                }
                 RemoteCommandResponseHeader resp(req.instruction, 0);
                 sendAll(client_sock, &resp, sizeof(resp));
                 break;

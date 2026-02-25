@@ -34,6 +34,9 @@ namespace Bn3Monkey
         // Kills the process, then blocks until all threads are joined.
         void close(int32_t process_id);
 
+        int32_t executeWithoutPipe(const char* cwd, const char* cmd);
+        void closeWithoutPipe(int32_t process_id);
+
         inline bool is_running() const { return _current_process_id != -1; }
 
         // Called by StreamServer when a stream client connects / disconnects.
@@ -65,6 +68,7 @@ namespace Bn3Monkey
         HANDLE _stderr_read { INVALID_HANDLE_VALUE };
 #else
         pid_t _pid         { -1 };
+        int   _stdin_write { -1 };
         int   _stdout_read { -1 };
         int   _stderr_read { -1 };
 #endif

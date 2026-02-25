@@ -31,6 +31,7 @@ namespace Bn3Monkey
             _stderr_read = INVALID_HANDLE_VALUE;
         }
 #else
+        if (_stdin_write != -1) { ::close(_stdin_write); _stdin_write = -1; }
         if (_stdout_read != -1) { ::close(_stdout_read); _stdout_read = -1; }
         if (_stderr_read != -1) { ::close(_stderr_read); _stderr_read = -1; }
 #endif
@@ -214,16 +215,22 @@ namespace Bn3Monkey
         _hProcess = pi.hProcess;
 
 #else
-        int stdout_pipe[2], stderr_pipe[2];
+        int stdin_pipe[2], stdout_pipe[2], stderr_pipe[2];
 
-        if (pipe(stdout_pipe) != 0) return -1;
+        if (pipe(stdin_pipe) != 0) return -1;
+        if (pipe(stdout_pipe) != 0) {
+            ::close(stdin_pipe[0]); ::close(stdin_pipe[1]);
+            return -1;
+        }
         if (pipe(stderr_pipe) != 0) {
+            ::close(stdin_pipe[0]); ::close(stdin_pipe[1]);
             ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
             return -1;
         }
 
         pid_t pid = fork();
         if (pid < 0) {
+            ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
             ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
             ::close(stderr_pipe[0]); ::close(stderr_pipe[1]);
             return -1;
@@ -233,8 +240,10 @@ namespace Bn3Monkey
             // Child: become a new process group leader so kill(-pgid) later
             // can terminate the entire subtree (including grandchildren).
             setpgid(0, 0);
+            dup2(stdin_pipe[0],  STDIN_FILENO);
             dup2(stdout_pipe[1], STDOUT_FILENO);
             dup2(stderr_pipe[1], STDERR_FILENO);
+            ::close(stdin_pipe[0]);  ::close(stdin_pipe[1]);
             ::close(stdout_pipe[0]); ::close(stdout_pipe[1]);
             ::close(stderr_pipe[0]); ::close(stderr_pipe[1]);
             if (cwd && cwd[0]) chdir(cwd);
@@ -242,9 +251,12 @@ namespace Bn3Monkey
             _exit(127);
         }
 
-        // Parent: close write ends so EOF reaches readers when child exits
+        // Parent: close read end of stdin pipe and both write ends of output pipes.
+        // Keep _stdin_write open so the child never receives EOF on stdin.
+        ::close(stdin_pipe[0]);
         ::close(stdout_pipe[1]);
         ::close(stderr_pipe[1]);
+        _stdin_write = stdin_pipe[1];
         _stdout_read = stdout_pipe[0];
         _stderr_read = stderr_pipe[0];
         _pid = pid;
@@ -301,6 +313,77 @@ namespace Bn3Monkey
         joinReaders();
 #endif
         reapProcess();  // reap zombie + sets _current_process_id = -1
+    }
+
+    int32_t RemoteProcess::executeWithoutPipe(const char* cwd, const char* cmd)
+    {
+        if (_current_process_id != -1)
+            return -1;
+
+#ifdef _WIN32
+        char buffer[4096] {0};
+        snprintf(buffer, sizeof(buffer), "%s", cmd);
+
+        STARTUPINFOA si{};
+        PROCESS_INFORMATION pi{};
+        si.cb = sizeof(si);
+
+        BOOL result = CreateProcessA(
+            nullptr,
+            buffer,
+            nullptr,
+            nullptr,
+            FALSE,
+            0,
+            nullptr,
+            (cwd && cwd[0]) ? cwd : nullptr,
+            &si,
+            &pi
+        );
+
+        if (!result)
+            return -1;
+
+        CloseHandle(pi.hThread);
+        _hProcess = pi.hProcess;
+
+#else
+        pid_t pid = fork();
+        if (pid < 0)
+            return -1;
+
+        if (pid == 0) {
+            setpgid(0, 0);
+            if (cwd && cwd[0]) chdir(cwd);
+            execl("/bin/sh", "sh", "-c", cmd, nullptr);
+            _exit(127);
+        }
+
+        _pid = pid;
+#endif
+
+        _current_process_id = 1;
+        return 1;
+    }
+
+    void RemoteProcess::closeWithoutPipe(int32_t /*process_id*/)
+    {
+#ifdef _WIN32
+        if (_hProcess != INVALID_HANDLE_VALUE) {
+            TerminateProcess(_hProcess, 1);
+            WaitForSingleObject(_hProcess, INFINITE);
+            CloseHandle(_hProcess);
+            _hProcess = INVALID_HANDLE_VALUE;
+        }
+#else
+        if (_pid != -1) {
+            kill(-_pid, SIGTERM);
+            int status;
+            waitpid(_pid, &status, 0);
+            _pid = -1;
+        }
+#endif
+        _current_process_id = -1;
     }
 
 } // namespace Bn3Monkey

@@ -4,12 +4,14 @@ project(remote-command C CXX)
 
 
 include(FetchContent)
-FetchContent_Declare(
-    kiotty_discover
-    GIT_REPOSITORY https://github.com/kiotty/kiotty-discovery
-    GIT_TAG 1.0.0
-)
-FetchContent_MakeAvailable(kiotty_discover)
+if(NOT TARGET kiotty_discovery_client)
+    FetchContent_Declare(
+        kiotty_discover
+        GIT_REPOSITORY https://github.com/kiotty/kiotty-discovery
+        GIT_TAG 1.0.0
+    )
+    FetchContent_MakeAvailable(kiotty_discover)
+endif()
 
 # ---------------------------------------------------------------------------
 # remote_command_client  —  C++11 static library
@@ -79,14 +81,16 @@ endif()
 option(REMOTE_COMMAND_BUILD_TESTS "Build integration tests (requires network access)" ON)
 
 if(REMOTE_COMMAND_BUILD_TESTS)
-    FetchContent_Declare(
-        googletest
-        GIT_REPOSITORY https://github.com/google/googletest.git
-        GIT_TAG        v1.14.0
-    )
-    # Prevent overriding the parent project's compiler/linker settings on Windows
-    set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
-    FetchContent_MakeAvailable(googletest)
+    if(NOT TARGET GTest::gtest_main)
+        FetchContent_Declare(
+            googletest
+            GIT_REPOSITORY https://github.com/google/googletest.git
+            GIT_TAG        v1.14.0
+        )
+        # Prevent overriding the parent project's compiler/linker settings on Windows
+        set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
+        FetchContent_MakeAvailable(googletest)
+    endif()
 
     add_executable(integration_test
         test/integration.cpp

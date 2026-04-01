@@ -35,7 +35,9 @@ set_target_properties(remote_command_client PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
-target_link_libraries(remote_command_client PRIVATE kiotty_discovery_client)
+find_package(Threads REQUIRED)
+
+target_link_libraries(remote_command_client PRIVATE kiotty_discovery_client Threads::Threads)
 if(WIN32)
     target_link_libraries(remote_command_client PRIVATE ws2_32)
 endif()
@@ -65,7 +67,7 @@ set_target_properties(remote_command_server PROPERTIES
     CXX_EXTENSIONS OFF
 )
 
-target_link_libraries(remote_command_server PRIVATE kiotty_discovery_server)
+target_link_libraries(remote_command_server PRIVATE kiotty_discovery_server Threads::Threads)
 if(WIN32)
     target_link_libraries(remote_command_server PRIVATE ws2_32)
 endif()
@@ -107,6 +109,8 @@ if(REMOTE_COMMAND_BUILD_TESTS)
         CXX_STANDARD_REQUIRED ON
         CXX_EXTENSIONS OFF
     )
+
+    target_link_libraries(integration_test PRIVATE Threads::Threads)
 
     if(WIN32)
         target_link_libraries(integration_test PRIVATE ws2_32)

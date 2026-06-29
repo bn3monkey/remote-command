@@ -1,0 +1,4 @@
+# Keep shell scripts LF so the shebang works on Linux/macOS (and curl | sh).
+*.sh   text eol=lf
+# PowerShell scripts are Windows-only.
+*.ps1  text eol=crlf

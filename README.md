@@ -12,10 +12,12 @@ A C++ library for sending commands to a remote process, transferring files, and 
 - [Constraints](#constraints)
 - [Supported Platforms & Compilers](#supported-platforms--compilers)
 - [CMake Integration (FetchContent)](#cmake-integration-fetchcontent)
+- [Installing the Server (Prebuilt Binary)](#installing-the-server-prebuilt-binary)
 - [Building the Server Binary](#building-the-server-binary)
 - [Building the Integration Tests](#building-the-integration-tests)
 - [API Reference](#api-reference)
 - [Protocol](#protocol)
+- [Version History](#version-history)
 
 ---
 
@@ -301,6 +303,89 @@ set_target_properties(your_server_target PROPERTIES
 
 ---
 
+## Installing the Server (Prebuilt Binary)
+
+For deployment you usually don't want to build from source on every host. Tagged
+releases publish a self-contained server binary for each platform via GitHub
+Actions ([`.github/workflows/release.yml`](.github/workflows/release.yml)), and a
+one-line installer downloads, checksum-verifies, and installs it.
+
+| Platform | Architecture | Release asset |
+|----------|--------------|---------------|
+| Linux    | x86_64 / amd64 | `remote_command_server-linux-x86_64` |
+| macOS    | x86_64 (Intel) | `remote_command_server-macos-x86_64` |
+| Windows  | x64 / AMD64    | `remote_command_server-windows-x86_64.exe` |
+
+You must explicitly choose where the binary is installed, so you always know
+exactly what to remove later. Pass `--default_path` to use the built-in default,
+or `--path <dir>` to install into a directory you control. Running with neither
+flag aborts with an error.
+
+### Linux / macOS
+
+```bash
+# default location ($HOME/.local/bin)
+curl -fsSL https://raw.githubusercontent.com/bn3monkey/remote-command/main/install.sh | sh -s -- --default_path
+
+# custom location
+curl -fsSL https://raw.githubusercontent.com/bn3monkey/remote-command/main/install.sh | sh -s -- --path /opt/remote-command
+```
+
+### Windows (PowerShell)
+
+```powershell
+# download first so the flags bind, then run with a chosen location
+irm https://raw.githubusercontent.com/bn3monkey/remote-command/main/install.ps1 -OutFile install.ps1
+.\install.ps1 -DefaultPath                 # %LOCALAPPDATA%\Programs\remote-command
+.\install.ps1 -Path C:\tools\remote-command
+```
+
+The installer drops the binary as `remote-command-server` (`.exe` on Windows)
+into the directory you chose, verifies its SHA-256 checksum, and prints the exact
+`rm` / `Remove-Item` command to uninstall it.
+
+| Option | Default | Purpose |
+|--------|---------|---------|
+| `--path <dir>` / `-Path <dir>` | — | install directory you control (mutually exclusive with the default flag) |
+| `--default_path` / `-DefaultPath` | `~/.local/bin` / `%LOCALAPPDATA%\Programs\remote-command` | use the built-in default location |
+| `--repo <owner/repo>` (or `REMOTE_COMMAND_REPO`) | `bn3monkey/remote-command` | GitHub repository to download from |
+| `--version <tag>` (or `REMOTE_COMMAND_VERSION`) | `latest` | release tag, e.g. `v1.0.0`, for reproducible deploys |
+
+> Only x86_64 / amd64 is currently published; the installer aborts on other
+> architectures (e.g. arm64).
+
+### Running it
+
+The installed binary takes the same arguments as the from-source build
+(`discovery_port command_port stream_port working_dir`, all optional):
+
+```bash
+# defaults: discovery=9000, command=9001, stream=9002, cwd="."
+remote-command-server
+
+# explicit ports and working directory
+remote-command-server 9000 9001 9002 /srv/workspace
+```
+
+### Use in a deployment script
+
+Because the installer pins a version and verifies checksums, a project's deploy
+script can fetch and launch the server without Docker:
+
+```bash
+#!/bin/sh
+set -e
+INSTALL_DIR=/opt/remote-command
+# install (or upgrade to) a pinned version into a directory we control
+curl -fsSL "https://raw.githubusercontent.com/bn3monkey/remote-command/main/install.sh" \
+  | sh -s -- --path "$INSTALL_DIR" --version v1.0.0
+
+# then run with this host's ports / workspace
+exec "$INSTALL_DIR/remote-command-server" 9000 9001 9002 /srv/workspace
+```
+
+---
+
 ## Building the Server Binary
 
 The `prj/` CMakeLists.txt includes the root via `add_subdirectory` and builds the server executable.
@@ -532,3 +617,13 @@ Payload layout per instruction:
 ```
 
 Both `runCommand` and `openProcess` deliver output via this socket. The server uses a mutex to ensure that concurrent writes from multiple background processes do not corrupt individual stream packets.
+
+---
+
+## Version History
+
+### v1.0.0
+
+- Prebuilt server binaries published via GitHub Releases for **Linux / macOS / Windows (x86_64)**, built by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+- One-line installers [`install.sh`](install.sh) / [`install.ps1`](install.ps1) with SHA-256 checksum verification and an explicit, user-chosen install location (`--path` / `--default_path`).
+- Server ignores `SIGPIPE` so a client disconnecting mid-transfer no longer terminates the process.

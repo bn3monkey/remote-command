@@ -1,0 +1,111 @@
+name: Release
+
+# Builds the server binary for Linux / macOS / Windows (x86_64) and publishes
+# them to a GitHub Release whenever a tag like `v1.0.0` is pushed.
+#
+#   git tag v1.0.0
+#   git push origin v1.0.0
+#
+# The published asset names are consumed verbatim by install.sh / install.ps1:
+#   remote_command_server-linux-x86_64
+#   remote_command_server-macos-x86_64
+#   remote_command_server-windows-x86_64.exe
+# Each ships with a matching `<asset>.sha256` checksum file.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-22.04          # older glibc -> runs on most Linux servers
+            asset: remote_command_server-linux-x86_64
+            # statically link the C++ runtime so the bare binary has no libstdc++ dependency
+            configure_args: -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+          - name: macos-x86_64
+            os: macos-13              # Intel runner -> x86_64
+            asset: remote_command_server-macos-x86_64
+            configure_args: -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
+          - name: windows-x86_64
+            os: windows-latest
+            asset: remote_command_server-windows-x86_64.exe
+            configure_args: -A x64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure
+        run: cmake -S prj -B prj/build -DREMOTE_COMMAND_BUILD_TESTS=OFF ${{ matrix.configure_args }}
+
+      - name: Build
+        run: cmake --build prj/build --config Release
+
+      - name: Stage binary (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          mkdir -p dist
+          cp prj/build/remote_command_server_app "dist/${{ matrix.asset }}"
+          chmod +x "dist/${{ matrix.asset }}"
+
+      - name: Stage binary (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Copy-Item prj/build/Release/remote_command_server_app.exe "dist/${{ matrix.asset }}"
+
+      - name: Checksum (Unix)
+        if: runner.os != 'Windows'
+        working-directory: dist
+        run: |
+          if command -v sha256sum >/dev/null 2>&1; then
+            sha256sum "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          else
+            shasum -a 256 "${{ matrix.asset }}" > "${{ matrix.asset }}.sha256"
+          fi
+
+      - name: Checksum (Windows)
+        if: runner.os == 'Windows'
+        working-directory: dist
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash "${{ matrix.asset }}" -Algorithm SHA256).Hash.ToLower()
+          "$h  ${{ matrix.asset }}" | Out-File -Encoding ascii -NoNewline "${{ matrix.asset }}.sha256"
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/*
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+    permissions:
+      contents: write
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: Publish to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true

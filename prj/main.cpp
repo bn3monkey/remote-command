@@ -24,6 +24,11 @@ int main(int argc, char* argv[])
 
     std::signal(SIGINT,  on_signal);
     std::signal(SIGTERM, on_signal);
+#ifndef _WIN32
+    // A client disconnecting mid-send raises SIGPIPE, whose default action
+    // terminates the server. Ignore it so send()/recv() just return an error.
+    std::signal(SIGPIPE, SIG_IGN);
+#endif
 
     std::printf("Remote Command Server\n");
     std::printf("  Discovery port : %d\n", discovery_port);

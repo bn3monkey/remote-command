@@ -21,6 +21,11 @@ on:
 permissions:
   contents: write
 
+# A newer run for the same tag cancels an older in-progress one.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   build:
     name: Build ${{ matrix.name }}
@@ -34,10 +39,6 @@ jobs:
             asset: remote_command_server-linux-x86_64
             # statically link the C++ runtime so the bare binary has no libstdc++ dependency
             configure_args: -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
-          - name: macos-x86_64
-            os: macos-13              # Intel runner -> x86_64
-            asset: remote_command_server-macos-x86_64
-            configure_args: -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES=x86_64
           - name: windows-x86_64
             os: windows-latest
             asset: remote_command_server-windows-x86_64.exe

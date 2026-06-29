@@ -70,10 +70,15 @@ fi
 os="$(uname -s)"
 arch="$(uname -m)"
 
+ext=""
 case "$os" in
   Linux)  plat=linux ;;
-  Darwin) plat=macos ;;
-  *) echo "error: unsupported OS '$os' (supported: Linux, Darwin)" >&2; exit 1 ;;
+  MINGW*|MSYS*|CYGWIN*) plat=windows; ext=".exe" ;;  # Git Bash / MSYS on Windows
+  Darwin)
+    echo "error: no prebuilt macOS binary is published; build from source instead." >&2
+    echo "       see the 'Building the Server Binary' section in the README." >&2
+    exit 1 ;;
+  *) echo "error: unsupported OS '$os' (supported: Linux, Windows via MSYS/MinGW)" >&2; exit 1 ;;
 esac
 
 case "$arch" in
@@ -81,7 +86,8 @@ case "$arch" in
   *) echo "error: unsupported architecture '$arch' (only x86_64/amd64 is supported)" >&2; exit 1 ;;
 esac
 
-asset="remote_command_server-${plat}-${cpu}"
+asset="remote_command_server-${plat}-${cpu}${ext}"
+BIN_NAME="${BIN_NAME}${ext}"
 
 if [ "$VERSION" = "latest" ]; then
   base="https://github.com/${REPO}/releases/latest/download"

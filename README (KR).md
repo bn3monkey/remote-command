@@ -310,8 +310,11 @@ set_target_properties(your_server_target PROPERTIES
 | 플랫폼 | 아키텍처 | 릴리스 에셋 |
 |--------|----------|-------------|
 | Linux   | x86_64 / amd64 | `remote_command_server-linux-x86_64` |
-| macOS   | x86_64 (Intel) | `remote_command_server-macos-x86_64` |
 | Windows | x64 / AMD64    | `remote_command_server-windows-x86_64.exe` |
+
+> macOS는 소스 빌드로는 완전히 지원되지만, 아직 prebuilt 바이너리는 제공하지 않습니다
+> (GitHub의 Intel macOS 러너 큐 대기가 너무 길어 CI에서 제외). macOS에서는
+> [서버 바이너리 빌드](#서버-바이너리-빌드) 절차로 소스에서 빌드하세요.
 
 나중에 정확히 무엇을 지울지 알 수 있도록, **설치 위치를 반드시 직접 지정**해야 합니다.
 기본 위치를 쓰려면 `--default_path`, 직접 관리하는 디렉터리에 설치하려면 `--path <dir>`를
@@ -618,6 +621,6 @@ instruction별 페이로드 구성:
 
 ### v1.0.0
 
-- **Linux / macOS / Windows (x86_64)** 용 미리 빌드된 서버 바이너리를 GitHub Releases로 발행. [`.github/workflows/release.yml`](.github/workflows/release.yml)이 빌드합니다.
+- **Linux / Windows (x86_64)** 용 미리 빌드된 서버 바이너리를 GitHub Releases로 발행. [`.github/workflows/release.yml`](.github/workflows/release.yml)이 빌드합니다. (macOS는 소스 빌드 지원.)
 - SHA-256 체크섬 검증과 사용자가 직접 지정하는 설치 위치(`--path` / `--default_path`)를 갖춘 한 줄 설치 스크립트 [`install.sh`](install.sh) / [`install.ps1`](install.ps1) 추가.
 - 클라이언트가 전송 도중 연결을 끊어도 서버가 종료되지 않도록 `SIGPIPE`를 무시 처리.

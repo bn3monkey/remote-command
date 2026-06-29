@@ -313,8 +313,11 @@ one-line installer downloads, checksum-verifies, and installs it.
 | Platform | Architecture | Release asset |
 |----------|--------------|---------------|
 | Linux    | x86_64 / amd64 | `remote_command_server-linux-x86_64` |
-| macOS    | x86_64 (Intel) | `remote_command_server-macos-x86_64` |
 | Windows  | x64 / AMD64    | `remote_command_server-windows-x86_64.exe` |
+
+> macOS is fully supported from source but does not yet ship a prebuilt binary
+> (GitHub's Intel macOS runners queue too long for CI). On macOS, build from
+> source as described in [Building the Server Binary](#building-the-server-binary).
 
 You must explicitly choose where the binary is installed, so you always know
 exactly what to remove later. Pass `--default_path` to use the built-in default,
@@ -624,6 +627,6 @@ Both `runCommand` and `openProcess` deliver output via this socket. The server u
 
 ### v1.0.0
 
-- Prebuilt server binaries published via GitHub Releases for **Linux / macOS / Windows (x86_64)**, built by [`.github/workflows/release.yml`](.github/workflows/release.yml).
+- Prebuilt server binaries published via GitHub Releases for **Linux / Windows (x86_64)**, built by [`.github/workflows/release.yml`](.github/workflows/release.yml). (macOS is supported from source.)
 - One-line installers [`install.sh`](install.sh) / [`install.ps1`](install.ps1) with SHA-256 checksum verification and an explicit, user-chosen install location (`--path` / `--default_path`).
 - Server ignores `SIGPIPE` so a client disconnecting mid-transfer no longer terminates the process.

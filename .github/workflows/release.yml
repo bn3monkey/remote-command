@@ -35,10 +35,12 @@ jobs:
       matrix:
         include:
           - name: linux-x86_64
-            os: ubuntu-22.04          # older glibc -> runs on most Linux servers
+            os: ubuntu-22.04
             asset: remote_command_server-linux-x86_64
-            # statically link the C++ runtime so the bare binary has no libstdc++ dependency
-            configure_args: -DCMAKE_BUILD_TYPE=Release -DCMAKE_EXE_LINKER_FLAGS="-static-libgcc -static-libstdc++"
+            # The server app is fully static-linked via CMakeLists.txt
+            # (REMOTE_COMMAND_STATIC), so the binary has no runtime glibc/libstdc++
+            # version dependency and runs on much older Linux distributions.
+            configure_args: -DCMAKE_BUILD_TYPE=Release
           - name: windows-x86_64
             os: windows-latest
             asset: remote_command_server-windows-x86_64.exe

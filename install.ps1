@@ -51,7 +51,11 @@ if ($Version -eq 'latest') {
 }
 
 # --- download --------------------------------------------------------------
-$tmp = Join-Path $env:TEMP ("remote-command-" + [System.Guid]::NewGuid().ToString('N'))
+# The download dir lives INSIDE the install path (".dl"), not in %TEMP%, so the
+# behavior matches install.sh and does not depend on the environment's temp dir.
+New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
+$tmp = Join-Path $InstallDir '.dl'
+if (Test-Path $tmp) { Remove-Item -Recurse -Force $tmp }
 New-Item -ItemType Directory -Force -Path $tmp | Out-Null
 try {
     Write-Host "Downloading $asset ($Version) from $Repo ..."
@@ -67,7 +71,6 @@ try {
     }
 
     # --- install -----------------------------------------------------------
-    New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
     $dest = Join-Path $InstallDir $BinName
     Copy-Item (Join-Path $tmp $asset) $dest -Force
     Write-Host "Installed: $dest"

@@ -96,32 +96,51 @@ else
 fi
 
 # --- download --------------------------------------------------------------
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
+# The download dir lives INSIDE the install path (".dl"), not in /tmp. This
+# avoids per-environment /tmp differences (private tmpfs, PrivateTmp, mktemp
+# quirks) that were deleting the temp dir mid-run. We remove it up front (in
+# case a previous run left it behind) and again when we are done.
+mkdir -p "$INSTALL_DIR"
+DL="${INSTALL_DIR}/.dl"
+rm -rf "$DL"
+mkdir -p "$DL"
 
 echo "Downloading ${asset} (${VERSION}) from ${REPO} ..."
-curl -fSL "${base}/${asset}"        -o "${tmp}/${asset}"
-curl -fSL "${base}/${asset}.sha256" -o "${tmp}/${asset}.sha256"
+curl -fSL "${base}/${asset}"        -o "${DL}/${asset}"
+curl -fSL "${base}/${asset}.sha256" -o "${DL}/${asset}.sha256"
 
 # --- verify checksum -------------------------------------------------------
+# Compare hashes directly (no subshell / no cd). The .sha256 file is
+# "<hash>  <filename>"; we only need the hash field.
 echo "Verifying checksum ..."
-(
-  cd "$tmp"
-  if command -v sha256sum >/dev/null 2>&1; then
-    sha256sum -c "${asset}.sha256"
-  else
-    shasum -a 256 -c "${asset}.sha256"
-  fi
-)
+expected="$(awk '{print $1}' "${DL}/${asset}.sha256")"
+if command -v sha256sum >/dev/null 2>&1; then
+  actual="$(sha256sum "${DL}/${asset}" | awk '{print $1}')"
+elif command -v shasum >/dev/null 2>&1; then
+  actual="$(shasum -a 256 "${DL}/${asset}" | awk '{print $1}')"
+else
+  echo "error: neither 'sha256sum' nor 'shasum' is available to verify the download" >&2
+  rm -rf "$DL"
+  exit 1
+fi
+if [ -z "$expected" ] || [ "$expected" != "$actual" ]; then
+  echo "error: checksum mismatch for ${asset}" >&2
+  echo "       expected: ${expected:-<empty>}" >&2
+  echo "       actual:   ${actual:-<empty>}" >&2
+  rm -rf "$DL"
+  exit 1
+fi
 
 # --- install ---------------------------------------------------------------
-mkdir -p "$INSTALL_DIR"
 if command -v install >/dev/null 2>&1; then
-  install -m 0755 "${tmp}/${asset}" "${INSTALL_DIR}/${BIN_NAME}"
+  install -m 0755 "${DL}/${asset}" "${INSTALL_DIR}/${BIN_NAME}"
 else
-  cp "${tmp}/${asset}" "${INSTALL_DIR}/${BIN_NAME}"
+  cp "${DL}/${asset}" "${INSTALL_DIR}/${BIN_NAME}"
   chmod 0755 "${INSTALL_DIR}/${BIN_NAME}"
 fi
+
+# download dir no longer needed
+rm -rf "$DL"
 
 echo "Installed: ${INSTALL_DIR}/${BIN_NAME}"
 echo "To uninstall:  rm \"${INSTALL_DIR}/${BIN_NAME}\""
